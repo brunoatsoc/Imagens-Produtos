@@ -12,7 +12,15 @@
        - nome_imagem  : usado para nomear o arquivo salvo
 
   3. Execute:
-       python buscar_imagens_produtos.py
+       python teste.py
+
+  4. Para rodar o script no WSL2
+        Primeiro crie o ambiente dentro do linux
+            python3 -m venv venv
+            source venv/bin/activate
+        Depois rode os comandos de instalação dos pacotes normalmente
+            pip install requests pillow tqdm rembg
+            pip install "rembg[cpu]"
 
   ATENÇÃO: As imagens serão salvas em PNG (com fundo transparente).
            O formato JPG não suporta transparência.
@@ -87,12 +95,12 @@ def sanitizar_nome(nome: str) -> str:
 
 
 def buscar_urls_imagens(produto: str, max_urls: int = 5) -> list:
-    """Faz busca no Google Images e retorna lista de URLs de imagens."""
+    """Faz busca no Bing Images e retorna lista de URLs de imagens."""
     query = quote_plus(f"{produto} {TERMO_EXTRA}")
-    url = f"https://www.google.com/search?q={query}&tbm=isch&hl=pt-BR"
+    url = f"https://www.bing.com/images/search?q={query}"
 
     headers = random.choice(HEADERS_LIST)
-    headers["Referer"] = "https://www.google.com/"
+    headers["Referer"] = "https://www.bing.com/"
 
     try:
         resp = requests.get(url, headers=headers, timeout=15)
@@ -101,12 +109,13 @@ def buscar_urls_imagens(produto: str, max_urls: int = 5) -> list:
         log.warning(f"Erro ao buscar '{produto}': {e}")
         return []
 
-    padrao = re.compile(r'"(https?://[^"]+\.(?:jpg|jpeg|png|webp))"', re.IGNORECASE)
+    # O Bing guarda os links originais em alta resolução dentro de um atributo chamado 'murl'
+    padrao = re.compile(r'murl&quot;:&quot;(https?://[^&]+?\.(?:jpg|jpeg|png|webp))&quot;', re.IGNORECASE)
     urls = padrao.findall(resp.text)
 
     urls_filtradas = [
         u for u in urls
-        if "google" not in u and "gstatic" not in u and len(u) < 500
+        if "bing.net" not in u and len(u) < 500
     ]
 
     return list(dict.fromkeys(urls_filtradas))[:max_urls]
