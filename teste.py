@@ -40,6 +40,7 @@ from PIL import Image
 from io import BytesIO
 from tqdm import tqdm
 from rembg import remove
+from ddgs import DDGS
 
 # ─────────────────────────────────────────────
 #  ⚙️  CONFIGURAÇÕES — AJUSTE AQUI
@@ -94,31 +95,53 @@ def sanitizar_nome(nome: str) -> str:
     return nome.strip()[:100]
 
 
+
 def buscar_urls_imagens(produto: str, max_urls: int = 5) -> list:
-    """Faz busca no Bing Images e retorna lista de URLs de imagens."""
-    query = quote_plus(f"{produto} {TERMO_EXTRA}")
-    url = f"https://www.bing.com/images/search?q={query}"
+    """
+    Busca imagens no DuckDuckGo.
+    Possui retry automático em caso de rate limit.
+    """
 
-    headers = random.choice(HEADERS_LIST)
-    headers["Referer"] = "https://www.bing.com/"
+    busca = f"{produto} {TERMO_EXTRA}"
 
-    try:
-        resp = requests.get(url, headers=headers, timeout=15)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        log.warning(f"Erro ao buscar '{produto}': {e}")
-        return []
+    for tentativa in range(3):
+        try:
+            with DDGS(timeout=20) as ddgs:
+                resultados = ddgs.images(
+                    busca,
+                    region="br-pt",
+                    safesearch="off",
+                    max_results=max_urls
+                )
 
-    # O Bing guarda os links originais em alta resolução dentro de um atributo chamado 'murl'
-    padrao = re.compile(r'murl&quot;:&quot;(https?://[^&]+?\.(?:jpg|jpeg|png|webp))&quot;', re.IGNORECASE)
-    urls = padrao.findall(resp.text)
+                urls = []
 
-    urls_filtradas = [
-        u for u in urls
-        if "bing.net" not in u and len(u) < 500
-    ]
+                for r in resultados:
+                    url = r.get("image")
 
-    return list(dict.fromkeys(urls_filtradas))[:max_urls]
+                    if not url:
+                        continue
+
+                    if len(url) > 500:
+                        continue
+
+                    urls.append(url)
+
+                urls = list(dict.fromkeys(urls))
+
+                if urls:
+                    return urls
+
+        except Exception as e:
+            log.warning(
+                f"Tentativa {tentativa + 1}/3 falhou para "
+                f"'{produto}': {e}"
+            )
+
+            # espera progressiva
+            time.sleep(random.uniform(5, 12))
+
+    return []
 
 
 def baixar_imagem(url: str) -> Image.Image | None:
