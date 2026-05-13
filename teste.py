@@ -4,12 +4,17 @@
 =============================================================
   Como usar:
   1. Instale as dependências:
-       pip install requests pillow tqdm rembg ddgs
+       pip install requests pillow tqdm rembg ddgs oracledb
 
-  2. Coloque o arquivo CSV com os produtos na mesma pasta
-     que este script. O CSV deve ter duas colunas:
-       - nome_produto : usado para buscar a imagem na internet
-       - nome_imagem  : usado para nomear o arquivo salvo
+  2. Configure o acesso ao banco usando variáveis de ambiente:
+       export DB_USER="usuario"
+       export DB_PASSWORD="senha"
+       export DB_DSN="host:porta/servico"
+
+     Por padrão o script usa Oracle via python-oracledb.
+     Para usar ODBC, configure:
+       export DB_PROVIDER="odbc"
+       export ODBC_CONNECTION_STRING="DSN=meu_dsn;UID=usuario;PWD=senha"
 
   3. Execute:
        python teste.py
@@ -19,7 +24,7 @@
             python3 -m venv venv
             source venv/bin/activate
         Depois rode os comandos de instalação dos pacotes normalmente
-            pip install requests pillow tqdm rembg ddgs
+            pip install requests pillow tqdm rembg ddgs oracledb
             pip install "rembg[cpu]"
 
   ATENÇÃO: As imagens serão salvas em PNG (com fundo transparente).
@@ -27,7 +32,6 @@
 =============================================================
 """
 
-import csv
 import logging
 import os
 import random
@@ -47,9 +51,6 @@ from ddgs import DDGS
 # ─────────────────────────────────────────────
 #  ⚙️  CONFIGURAÇÕES — AJUSTE AQUI
 # ─────────────────────────────────────────────
-CSV_FILE        = "produtos.csv"       # Caminho para o seu arquivo CSV
-COLUNA_BUSCA    = "nome_produto"       # Coluna usada para buscar a imagem no Google
-COLUNA_ARQUIVO  = "nome_imagem"        # Coluna usada para nomear o arquivo salvo
 PASTA_SAIDA     = "imagens_produtos"   # Pasta onde as imagens serão salvas
 DELAY_MIN       = 1.5                  # Espera mínima entre buscas (segundos)
 DELAY_MAX       = 3.5                  # Espera máxima entre buscas (segundos)
@@ -64,6 +65,23 @@ LARGURA_FINAL_PX = 406                 # Largura final das imagens salvas
 ALTURA_FINAL_PX  = 406                 # Altura final das imagens salvas
 MARGEM_FINAL_PX  = 12                  # Margem transparente ao redor do produto
 LOG_FILE        = "log_download.txt"   # Arquivo de log
+
+# Banco de dados
+DB_PROVIDER     = os.getenv("DB_PROVIDER", "oracle").strip().lower()
+DB_USER         = os.getenv("DB_USER", "IMAGETEST")
+DB_PASSWORD     = os.getenv("DB_PASSWORD", "1003200039")
+DB_DSN          = os.getenv("DB_DSN", "localhost:1521/XE")
+DB_CLIENT_LIB_DIR = os.getenv("DB_CLIENT_LIB_DIR", "")
+DB_CONNECT_TIMEOUT = int(os.getenv("DB_CONNECT_TIMEOUT", "30") or 30)
+ODBC_CONNECTION_STRING = os.getenv("ODBC_CONNECTION_STRING", "")
+
+TABELA_OFERTAS  = os.getenv("TABELA_OFERTAS", "IMAGETEST.WSOFERTASATIVAS")
+TABELA_IMAGENS  = os.getenv("TABELA_IMAGENS", "IMAGETEST.PRODUTOSIMAGENS")
+COLUNA_CODIGO_OFERTA = os.getenv("COLUNA_CODIGO_OFERTA", "PROCODBASE")
+COLUNA_DESCRICAO_OFERTA = os.getenv("COLUNA_DESCRICAO_OFERTA", "PRODESCRICAO")
+COLUNA_CODIGO_IMAGEM = os.getenv("COLUNA_CODIGO_IMAGEM", "PROIMGCODBASE")
+USUARIO_ALTERACAO_IMAGEM = os.getenv("USUARIO_ALTERACAO_IMAGEM", "BUSCADOR_IMAGENS")
+FLAG_EVTCOM_AUTOMATICO = int(os.getenv("FLAG_EVTCOM_AUTOMATICO", "1") or 1)
 # ─────────────────────────────────────────────
 
 logging.basicConfig(
@@ -95,8 +113,6 @@ HEADERS_LIST = [
         "Accept-Language": "pt-BR,pt;q=0.9",
     },
 ]
-
-CSV_ENCODINGS = ("utf-8-sig", "utf-8", "latin1")
 
 ABREVIACOES_BUSCA = [
     (r"\bAGUA/SAL\b", "AGUA E SAL"),
@@ -503,57 +519,264 @@ def ajustar_imagem_existente(caminho_img: Path) -> bool:
         return False
 
 
-def ler_produtos_csv(caminho: str) -> list:
-    """Lê o CSV e retorna lista de tuplas (nome_para_buscar, nome_para_salvar)."""
-    produtos = []
-    linhas = None
-    encoding_usado = None
+def validar_identificador_sql(nome: str, campo: str) -> str:
+    """
+    Valida nomes configuráveis de tabelas/colunas antes de montar a consulta.
+    Permite nomes simples ou qualificados por schema, como USUARIO.TABELA.
+    """
+    identificador = str(nome or "").strip().upper()
 
-    for encoding in CSV_ENCODINGS:
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]*(?:\.[A-Z][A-Z0-9_]*)*", identificador):
+        raise ValueError(f"identificador SQL inválido em {campo}: {nome!r}")
+
+    return identificador
+
+
+def montar_sql_produtos_sem_imagem() -> str:
+    """Monta o SELECT das ofertas ativas que ainda não possuem imagem."""
+    tabela_ofertas = validar_identificador_sql(TABELA_OFERTAS, "TABELA_OFERTAS")
+    tabela_imagens = validar_identificador_sql(TABELA_IMAGENS, "TABELA_IMAGENS")
+    coluna_codigo_oferta = validar_identificador_sql(COLUNA_CODIGO_OFERTA, "COLUNA_CODIGO_OFERTA")
+    coluna_descricao_oferta = validar_identificador_sql(
+        COLUNA_DESCRICAO_OFERTA,
+        "COLUNA_DESCRICAO_OFERTA",
+    )
+    coluna_codigo_imagem = validar_identificador_sql(COLUNA_CODIGO_IMAGEM, "COLUNA_CODIGO_IMAGEM")
+
+    return f"""
+        SELECT DISTINCT
+               o.{coluna_codigo_oferta} AS procodbase,
+               o.{coluna_descricao_oferta} AS prodescricao
+          FROM {tabela_ofertas} o
+          LEFT JOIN {tabela_imagens} i
+            ON i.{coluna_codigo_imagem} = o.{coluna_codigo_oferta}
+         WHERE i.{coluna_codigo_imagem} IS NULL
+           AND o.{coluna_codigo_oferta} IS NOT NULL
+           AND o.{coluna_descricao_oferta} IS NOT NULL
+         ORDER BY prodescricao
+    """
+
+
+def conectar_banco():
+    """Abre a conexão com o banco configurado por variáveis de ambiente."""
+    if DB_PROVIDER == "oracle":
         try:
-            with open(caminho, newline="", encoding=encoding) as f:
-                linhas = list(csv.DictReader(f, delimiter=";"))
-            encoding_usado = encoding
-            break
-        except UnicodeDecodeError:
-            continue
+            import oracledb
+        except ImportError as e:
+            raise RuntimeError(
+                "dependência 'oracledb' não instalada. "
+                "Instale com: pip install oracledb"
+            ) from e
 
-    if linhas is None:
-        raise ValueError(f"não foi possível ler o CSV com: {', '.join(CSV_ENCODINGS)}")
+        if not DB_USER or not DB_PASSWORD or not DB_DSN:
+            raise ValueError("configure DB_USER, DB_PASSWORD e DB_DSN para conectar no Oracle")
 
-    log.info(f"📄 CSV lido com encoding: {encoding_usado}")
+        if DB_CLIENT_LIB_DIR:
+            try:
+                oracledb.init_oracle_client(lib_dir=DB_CLIENT_LIB_DIR)
+            except Exception as e:
+                log.warning(f"Não foi possível inicializar Oracle Client: {e}")
 
-    for linha in linhas:
-        nome_busca   = linha.get(COLUNA_BUSCA, "").strip()
-        nome_arquivo = linha.get(COLUNA_ARQUIVO, "").strip()
+        return oracledb.connect(
+            user=DB_USER,
+            password=DB_PASSWORD,
+            dsn=DB_DSN,
+        )
 
-        if not nome_busca:
-            continue
+    if DB_PROVIDER == "odbc":
+        try:
+            import pyodbc
+        except ImportError as e:
+            raise RuntimeError(
+                "dependência 'pyodbc' não instalada. "
+                "Instale com: pip install pyodbc"
+            ) from e
 
-        if not nome_arquivo:
-            nome_arquivo = nome_busca
+        if not ODBC_CONNECTION_STRING:
+            raise ValueError("configure ODBC_CONNECTION_STRING para conectar via ODBC")
 
-        produtos.append((nome_busca, nome_arquivo))
+        return pyodbc.connect(ODBC_CONNECTION_STRING, timeout=DB_CONNECT_TIMEOUT)
+
+    raise ValueError("DB_PROVIDER deve ser 'oracle' ou 'odbc'")
+
+
+def ler_produtos_banco() -> list[tuple[str, str]]:
+    """
+    Busca no banco as ofertas ativas sem imagem.
+    Retorna tuplas (prodescricao_para_buscar, procodbase_para_salvar).
+    """
+    produtos = []
+    sql = montar_sql_produtos_sem_imagem()
+
+    log.info("🗄️  Consultando ofertas ativas sem imagem no banco...")
+
+    conexao = conectar_banco()
+    try:
+        cursor = conexao.cursor()
+        try:
+            cursor.execute(sql)
+
+            for procodbase, prodescricao in cursor:
+                nome_busca = str(prodescricao or "").strip()
+                nome_arquivo = str(procodbase or "").strip()
+
+                if not nome_busca or not nome_arquivo:
+                    continue
+
+                produtos.append((nome_busca, nome_arquivo))
+        finally:
+            cursor.close()
+    finally:
+        conexao.close()
 
     return produtos
+
+
+def montar_sql_insert_imagem() -> str:
+    """Monta o INSERT que grava a imagem baixada na tabela de imagens."""
+    tabela_imagens = validar_identificador_sql(TABELA_IMAGENS, "TABELA_IMAGENS")
+    coluna_codigo_imagem = validar_identificador_sql(COLUNA_CODIGO_IMAGEM, "COLUNA_CODIGO_IMAGEM")
+
+    return f"""
+        INSERT INTO {tabela_imagens} (
+            {coluna_codigo_imagem},
+            PROIMGARQIMAGEM,
+            PROIMGNOMEARQUIVO,
+            PROIMGUSRALTERACAO,
+            PROIMGDTAALTERACAO,
+            PROIMGFLAGEVTCOMAUTOMATICO,
+            PROIMGDTAEVTCOMAUTOMATICO
+        )
+        VALUES (
+            :codigo,
+            :imagem,
+            :nome_arquivo,
+            :usuario,
+            SYSDATE,
+            :flag_automatico,
+            SYSDATE
+        )
+    """
+
+
+def erro_chave_duplicada(erro: Exception) -> bool:
+    """Identifica erro de PK/unique para contar como imagem já existente."""
+    primeiro_arg = erro.args[0] if getattr(erro, "args", None) else None
+    codigo = getattr(primeiro_arg, "code", None)
+    return codigo == 1 or "ORA-00001" in str(erro)
+
+
+def configurar_bind_blob(cursor) -> None:
+    """Ajuda o python-oracledb a tratar o bind da imagem como BLOB."""
+    if DB_PROVIDER != "oracle":
+        return
+
+    try:
+        import oracledb
+
+        cursor.setinputsizes(imagem=oracledb.DB_TYPE_BLOB)
+    except Exception as e:
+        log.debug(f"Não foi possível configurar bind BLOB explicitamente: {e}")
+
+
+def preparar_codigo_banco(codigo: str) -> int:
+    """Converte o PROCODBASE para NUMBER(18,0), como a tabela espera."""
+    codigo_limpo = str(codigo or "").strip()
+
+    if not re.fullmatch(r"\d+", codigo_limpo):
+        raise ValueError(f"PROCODBASE inválido para inserir imagem: {codigo!r}")
+
+    return int(codigo_limpo)
+
+
+def registrar_imagem_pronta(
+    imagens_prontas: dict[int, Path],
+    codigo: str,
+    caminho_img: Path,
+) -> None:
+    """Guarda uma imagem pronta para ser inserida no banco ao final."""
+    if not caminho_img.exists():
+        return
+
+    try:
+        imagens_prontas[preparar_codigo_banco(codigo)] = caminho_img
+    except ValueError as e:
+        log.warning(f"{e}. Arquivo ignorado no insert: {caminho_img.name}")
+
+
+def inserir_imagens_banco(imagens_prontas: dict[int, Path]) -> tuple[int, int, int]:
+    """
+    Insere no banco as imagens geradas/localizadas.
+    Retorna (inseridas, ja_existiam_no_banco, falhas).
+    """
+    if not imagens_prontas:
+        return 0, 0, 0
+
+    sql = montar_sql_insert_imagem()
+    inseridas = 0
+    ja_existiam = 0
+    falhas = 0
+
+    log.info(f"🗄️  Inserindo {len(imagens_prontas)} imagens na tabela {TABELA_IMAGENS}...")
+
+    conexao = conectar_banco()
+    try:
+        cursor = conexao.cursor()
+        try:
+            configurar_bind_blob(cursor)
+
+            for codigo, caminho_img in imagens_prontas.items():
+                try:
+                    imagem_bytes = caminho_img.read_bytes()
+                    nome_arquivo = caminho_img.name[:50]
+
+                    cursor.execute(
+                        sql,
+                        {
+                            "codigo": codigo,
+                            "imagem": imagem_bytes,
+                            "nome_arquivo": nome_arquivo,
+                            "usuario": USUARIO_ALTERACAO_IMAGEM[:50],
+                            "flag_automatico": FLAG_EVTCOM_AUTOMATICO,
+                        },
+                    )
+                    inseridas += 1
+                except Exception as e:
+                    if erro_chave_duplicada(e):
+                        ja_existiam += 1
+                        continue
+
+                    falhas += 1
+                    log.warning(
+                        f"Não foi possível inserir '{caminho_img.name}' "
+                        f"(PROCODBASE={codigo}) no banco: {e}"
+                    )
+
+            conexao.commit()
+        finally:
+            cursor.close()
+    except Exception:
+        conexao.rollback()
+        raise
+    finally:
+        conexao.close()
+
+    return inseridas, ja_existiam, falhas
 
 
 def main():
     pasta = Path(PASTA_SAIDA)
     pasta.mkdir(parents=True, exist_ok=True)
 
-    if not os.path.exists(CSV_FILE):
-        log.error(f"Arquivo '{CSV_FILE}' não encontrado!")
-        return
-
-    produtos = ler_produtos_csv(CSV_FILE)
-    log.info(f"✅ {len(produtos)} produtos encontrados no CSV.")
+    produtos = ler_produtos_banco()
+    log.info(f"✅ {len(produtos)} ofertas ativas sem imagem encontradas no banco.")
     log.info(f"ℹ️  As imagens serão salvas em PNG com fundo transparente.")
 
     sucesso    = 0
     falha      = 0
     ja_existia = 0
     redimensionadas = 0
+    imagens_prontas: dict[int, Path] = {}
 
     for nome_busca, nome_arquivo in tqdm(produtos, desc="Baixando imagens", unit="produto"):
         # Salva sempre como .png (transparência exige PNG)
@@ -570,6 +793,7 @@ def main():
                 log.info(f"📐 Imagem ajustada para 406x406: {nome_final}")
 
             ja_existia += 1
+            registrar_imagem_pronta(imagens_prontas, nome_arquivo, caminho_img)
             continue
 
         candidatos = buscar_candidatos_imagens(nome_busca)
@@ -591,6 +815,7 @@ def main():
                 log.info(f"✔ '{nome_busca}' → {nome_final}")
                 sucesso += 1
                 baixou = True
+                registrar_imagem_pronta(imagens_prontas, nome_arquivo, caminho_img)
                 break
             except Exception as e:
                 log.warning(f"Erro ao remover fundo de '{nome_busca}': {e}")
@@ -602,12 +827,17 @@ def main():
 
         time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
 
+    inseridas_banco, ja_existiam_banco, falhas_banco = inserir_imagens_banco(imagens_prontas)
+
     log.info("=" * 50)
     log.info(f"🎉 CONCLUÍDO!")
     log.info(f"   ✔ Baixados com sucesso : {sucesso}")
     log.info(f"   ⏭ Já existiam         : {ja_existia}")
     log.info(f"   📐 Ajustadas 406x406   : {redimensionadas}")
     log.info(f"   ✘ Falhas               : {falha}")
+    log.info(f"   🗄️  Inseridas no banco : {inseridas_banco}")
+    log.info(f"   🗄️  Já estavam no banco: {ja_existiam_banco}")
+    log.info(f"   🗄️  Falhas no banco    : {falhas_banco}")
     log.info(f"   📁 Imagens salvas em   : {pasta.resolve()}")
     log.info("=" * 50)
 

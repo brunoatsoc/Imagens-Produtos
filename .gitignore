@@ -1,4 +1,6 @@
 venv/
 imagens_produtos/
+instantclient_23_0/
 *.txt
 *.csv
+.env
