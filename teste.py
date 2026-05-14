@@ -6,15 +6,20 @@
   1. Instale as dependências:
        pip install requests pillow tqdm rembg ddgs oracledb
 
-  2. Configure o acesso ao banco usando variáveis de ambiente:
-       export DB_USER="usuario"
-       export DB_PASSWORD="senha"
-       export DB_DSN="host:porta/servico"
+  2. Configure o acesso ao banco no arquivo .env, na mesma pasta do script:
+       DB_PROVIDER=oracle
+       DB_USER=usuario
+       DB_PASSWORD=senha
+       DB_DSN=host:porta/servico
+       TABELA_OFERTAS=CLIENTE.WSOFERTASATIVAS
+       TABELA_IMAGENS=CLIENTE.PRODUTOSIMAGENS
+       LARGURA_FINAL_PX=406
+       ALTURA_FINAL_PX=406
 
      Por padrão o script usa Oracle via python-oracledb.
      Para usar ODBC, configure:
-       export DB_PROVIDER="odbc"
-       export ODBC_CONNECTION_STRING="DSN=meu_dsn;UID=usuario;PWD=senha"
+       DB_PROVIDER=odbc
+       ODBC_CONNECTION_STRING=DSN=meu_dsn;UID=usuario;PWD=senha
 
   3. Execute:
        python teste.py
@@ -42,11 +47,75 @@ import unicodedata
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+from typing import Optional
 from urllib.parse import urlparse
 from PIL import Image
 from tqdm import tqdm
 from rembg import remove
 from ddgs import DDGS
+
+
+BASE_DIR = Path(__file__).resolve().parent
+
+
+def carregar_dotenv(caminho_env: Optional[Path] = None) -> None:
+    """
+    Carrega variaveis de ambiente de um arquivo .env simples.
+    Variaveis ja existentes no sistema prevalecem sobre o arquivo.
+    """
+    caminho_env = caminho_env or BASE_DIR / ".env"
+
+    if not caminho_env.exists():
+        return
+
+    for linha in caminho_env.read_text(encoding="utf-8").splitlines():
+        linha = linha.strip()
+
+        if not linha or linha.startswith("#"):
+            continue
+
+        if linha.startswith("export "):
+            linha = linha.removeprefix("export ").strip()
+
+        if "=" not in linha:
+            continue
+
+        chave, valor = linha.split("=", 1)
+        chave = chave.strip()
+
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", chave):
+            continue
+
+        valor = valor.strip()
+        if len(valor) >= 2 and valor[0] == valor[-1] and valor[0] in {"'", '"'}:
+            valor = valor[1:-1]
+        else:
+            valor = valor.split(" #", 1)[0].strip()
+
+        os.environ.setdefault(chave, valor)
+
+
+def obter_env_int(nome: str, padrao: int, minimo: Optional[int] = None) -> int:
+    """Le e valida variaveis de ambiente inteiras."""
+    valor = os.getenv(nome, "")
+
+    if not valor.strip():
+        numero = padrao
+    else:
+        try:
+            numero = int(valor.strip())
+        except ValueError as e:
+            raise ValueError(
+                f"{nome} deve ser um numero inteiro; valor recebido: {valor!r}"
+            ) from e
+
+    if minimo is not None and numero < minimo:
+        raise ValueError(f"{nome} deve ser maior ou igual a {minimo}; valor recebido: {numero}")
+
+    return numero
+
+
+carregar_dotenv()
 
 # ─────────────────────────────────────────────
 #  ⚙️  CONFIGURAÇÕES — AJUSTE AQUI
@@ -61,27 +130,27 @@ PROPORCAO_MAX   = 5.0                  # Ignora banners/imagens muito esticadas
 MAX_RESULTADOS_BUSCA = 30              # Quantidade de resultados avaliados por consulta
 MIN_SCORE_IMAGEM = 18                  # Pontuação mínima para aceitar uma imagem
 TERMO_EXTRA     = "foto produto embalagem"  # Termo extra para refinar a busca
-LARGURA_FINAL_PX = 406                 # Largura final das imagens salvas
-ALTURA_FINAL_PX  = 406                 # Altura final das imagens salvas
+LARGURA_FINAL_PX = obter_env_int("LARGURA_FINAL_PX", 406, minimo=1)  # Largura final das imagens salvas
+ALTURA_FINAL_PX  = obter_env_int("ALTURA_FINAL_PX", 406, minimo=1)   # Altura final das imagens salvas
 MARGEM_FINAL_PX  = 12                  # Margem transparente ao redor do produto
 LOG_FILE        = "log_download.txt"   # Arquivo de log
 
 # Banco de dados
 DB_PROVIDER     = os.getenv("DB_PROVIDER", "oracle").strip().lower()
-DB_USER         = os.getenv("DB_USER", "IMAGETEST")
-DB_PASSWORD     = os.getenv("DB_PASSWORD", "1003200039")
-DB_DSN          = os.getenv("DB_DSN", "localhost:1521/XE")
+DB_USER         = os.getenv("DB_USER", "")
+DB_PASSWORD     = os.getenv("DB_PASSWORD", "")
+DB_DSN          = os.getenv("DB_DSN", "")
 DB_CLIENT_LIB_DIR = os.getenv("DB_CLIENT_LIB_DIR", "")
-DB_CONNECT_TIMEOUT = int(os.getenv("DB_CONNECT_TIMEOUT", "30") or 30)
+DB_CONNECT_TIMEOUT = obter_env_int("DB_CONNECT_TIMEOUT", 30, minimo=1)
 ODBC_CONNECTION_STRING = os.getenv("ODBC_CONNECTION_STRING", "")
 
-TABELA_OFERTAS  = os.getenv("TABELA_OFERTAS", "IMAGETEST.WSOFERTASATIVAS")
-TABELA_IMAGENS  = os.getenv("TABELA_IMAGENS", "IMAGETEST.PRODUTOSIMAGENS")
+TABELA_OFERTAS  = os.getenv("TABELA_OFERTAS", "")
+TABELA_IMAGENS  = os.getenv("TABELA_IMAGENS", "")
 COLUNA_CODIGO_OFERTA = os.getenv("COLUNA_CODIGO_OFERTA", "PROCODBASE")
 COLUNA_DESCRICAO_OFERTA = os.getenv("COLUNA_DESCRICAO_OFERTA", "PRODESCRICAO")
 COLUNA_CODIGO_IMAGEM = os.getenv("COLUNA_CODIGO_IMAGEM", "PROIMGCODBASE")
 USUARIO_ALTERACAO_IMAGEM = os.getenv("USUARIO_ALTERACAO_IMAGEM", "BUSCADOR_IMAGENS")
-FLAG_EVTCOM_AUTOMATICO = int(os.getenv("FLAG_EVTCOM_AUTOMATICO", "1") or 1)
+FLAG_EVTCOM_AUTOMATICO = obter_env_int("FLAG_EVTCOM_AUTOMATICO", 1)
 # ─────────────────────────────────────────────
 
 logging.basicConfig(
@@ -475,7 +544,7 @@ def remover_fundo(img: Image.Image) -> Image.Image:
 
 
 def redimensionar_para_tamanho_final(img: Image.Image) -> Image.Image:
-    """Centraliza a imagem em uma tela transparente de 406x406 sem deformar."""
+    """Centraliza a imagem no tamanho final configurado, sem deformar."""
     img = img.convert("RGBA")
     largura_final = LARGURA_FINAL_PX
     altura_final = ALTURA_FINAL_PX
@@ -526,6 +595,9 @@ def validar_identificador_sql(nome: str, campo: str) -> str:
     """
     identificador = str(nome or "").strip().upper()
 
+    if not identificador:
+        raise ValueError(f"configure {campo} no .env")
+
     if not re.fullmatch(r"[A-Z][A-Z0-9_]*(?:\.[A-Z][A-Z0-9_]*)*", identificador):
         raise ValueError(f"identificador SQL inválido em {campo}: {nome!r}")
 
@@ -569,7 +641,7 @@ def conectar_banco():
             ) from e
 
         if not DB_USER or not DB_PASSWORD or not DB_DSN:
-            raise ValueError("configure DB_USER, DB_PASSWORD e DB_DSN para conectar no Oracle")
+            raise ValueError("configure DB_USER, DB_PASSWORD e DB_DSN no .env para conectar no Oracle")
 
         if DB_CLIENT_LIB_DIR:
             try:
@@ -593,7 +665,7 @@ def conectar_banco():
             ) from e
 
         if not ODBC_CONNECTION_STRING:
-            raise ValueError("configure ODBC_CONNECTION_STRING para conectar via ODBC")
+            raise ValueError("configure ODBC_CONNECTION_STRING no .env para conectar via ODBC")
 
         return pyodbc.connect(ODBC_CONNECTION_STRING, timeout=DB_CONNECT_TIMEOUT)
 
@@ -767,10 +839,11 @@ def inserir_imagens_banco(imagens_prontas: dict[int, Path]) -> tuple[int, int, i
 def main():
     pasta = Path(PASTA_SAIDA)
     pasta.mkdir(parents=True, exist_ok=True)
+    tamanho_final = f"{LARGURA_FINAL_PX}x{ALTURA_FINAL_PX}"
 
     produtos = ler_produtos_banco()
     log.info(f"✅ {len(produtos)} ofertas ativas sem imagem encontradas no banco.")
-    log.info(f"ℹ️  As imagens serão salvas em PNG com fundo transparente.")
+    log.info(f"ℹ️  As imagens serão salvas em PNG com fundo transparente no tamanho {tamanho_final}.")
 
     sucesso    = 0
     falha      = 0
@@ -790,7 +863,7 @@ def main():
         if caminho_img.exists():
             if ajustar_imagem_existente(caminho_img):
                 redimensionadas += 1
-                log.info(f"📐 Imagem ajustada para 406x406: {nome_final}")
+                log.info(f"📐 Imagem ajustada para {tamanho_final}: {nome_final}")
 
             ja_existia += 1
             registrar_imagem_pronta(imagens_prontas, nome_arquivo, caminho_img)
@@ -833,7 +906,7 @@ def main():
     log.info(f"🎉 CONCLUÍDO!")
     log.info(f"   ✔ Baixados com sucesso : {sucesso}")
     log.info(f"   ⏭ Já existiam         : {ja_existia}")
-    log.info(f"   📐 Ajustadas 406x406   : {redimensionadas}")
+    log.info(f"   📐 Ajustadas {tamanho_final}   : {redimensionadas}")
     log.info(f"   ✘ Falhas               : {falha}")
     log.info(f"   🗄️  Inseridas no banco : {inseridas_banco}")
     log.info(f"   🗄️  Já estavam no banco: {ja_existiam_banco}")
