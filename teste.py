@@ -42,6 +42,7 @@ import os
 import random
 import re
 import requests
+import sys
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -55,7 +56,10 @@ from rembg import remove
 from ddgs import DDGS
 
 
-BASE_DIR = Path(__file__).resolve().parent
+if getattr(sys, 'frozen', False):
+    BASE_DIR = Path(sys.executable).resolve().parent
+else:
+    BASE_DIR = Path(__file__).resolve().parent
 
 
 def carregar_dotenv(caminho_env: Optional[Path] = None) -> None:
@@ -115,12 +119,23 @@ def obter_env_int(nome: str, padrao: int, minimo: Optional[int] = None) -> int:
     return numero
 
 
+def resolver_pasta_saida(caminho: str) -> Path:
+    """Resolve a pasta de saida a partir da pasta do script/executavel."""
+    caminho = str(caminho or "").strip() or "imagens_produtos"
+    pasta = Path(caminho).expanduser()
+
+    if not pasta.is_absolute():
+        pasta = BASE_DIR / pasta
+
+    return pasta
+
+
 carregar_dotenv()
 
 # ─────────────────────────────────────────────
 #  ⚙️  CONFIGURAÇÕES — AJUSTE AQUI
 # ─────────────────────────────────────────────
-PASTA_SAIDA     = "imagens_produtos"   # Pasta onde as imagens serão salvas
+PASTA_SAIDA     = os.getenv("PASTA_SAIDA", "imagens_produtos")   # Pasta onde as imagens serão salvas
 DELAY_MIN       = 1.5                  # Espera mínima entre buscas (segundos)
 DELAY_MAX       = 3.5                  # Espera máxima entre buscas (segundos)
 TAMANHO_MIN_KB  = 5                    # Ignora imagens menores que X KB
@@ -134,7 +149,6 @@ PRODUTOS_POR_LOTE = obter_env_int("PRODUTOS_POR_LOTE", 100, minimo=1)  # Quantid
 LARGURA_FINAL_PX = obter_env_int("LARGURA_FINAL_PX", 406, minimo=1)  # Largura final das imagens salvas
 ALTURA_FINAL_PX  = obter_env_int("ALTURA_FINAL_PX", 406, minimo=1)   # Altura final das imagens salvas
 MARGEM_FINAL_PX  = 12                  # Margem transparente ao redor do produto
-LOG_FILE        = "log_download.txt"   # Arquivo de log
 
 # Banco de dados
 DB_PROVIDER     = os.getenv("DB_PROVIDER", "oracle").strip().lower()
@@ -158,7 +172,6 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
         logging.StreamHandler()
     ]
 )
@@ -935,11 +948,12 @@ def inserir_imagens_banco(imagens_prontas: dict[int, Path]) -> tuple[int, int, i
 
 
 def main():
-    pasta = Path(PASTA_SAIDA)
+    pasta = resolver_pasta_saida(PASTA_SAIDA)
     pasta.mkdir(parents=True, exist_ok=True)
     tamanho_final = f"{LARGURA_FINAL_PX}x{ALTURA_FINAL_PX}"
 
     log.info(f"ℹ️  As imagens serão salvas em PNG com fundo transparente no tamanho {tamanho_final}.")
+    log.info(f"📁 Pasta de saída das imagens: {pasta.resolve()}")
 
     sucesso    = 0
     falha      = 0
