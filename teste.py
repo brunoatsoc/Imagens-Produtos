@@ -130,6 +130,7 @@ PROPORCAO_MAX   = 5.0                  # Ignora banners/imagens muito esticadas
 MAX_RESULTADOS_BUSCA = 30              # Quantidade de resultados avaliados por consulta
 MIN_SCORE_IMAGEM = 18                  # Pontuação mínima para aceitar uma imagem
 TERMO_EXTRA     = "foto produto embalagem"  # Termo extra para refinar a busca
+PRODUTOS_POR_LOTE = obter_env_int("PRODUTOS_POR_LOTE", 100, minimo=1)  # Quantidade de produtos consultados por vez
 LARGURA_FINAL_PX = obter_env_int("LARGURA_FINAL_PX", 406, minimo=1)  # Largura final das imagens salvas
 ALTURA_FINAL_PX  = obter_env_int("ALTURA_FINAL_PX", 406, minimo=1)   # Altura final das imagens salvas
 MARGEM_FINAL_PX  = 12                  # Margem transparente ao redor do produto
@@ -604,8 +605,8 @@ def validar_identificador_sql(nome: str, campo: str) -> str:
     return identificador
 
 
-def montar_sql_produtos_sem_imagem() -> str:
-    """Monta o SELECT das ofertas ativas que ainda não possuem imagem."""
+def montar_sql_base_produtos_sem_imagem() -> str:
+    """Monta a base do SELECT das ofertas ativas que ainda não possuem imagem."""
     tabela_ofertas = validar_identificador_sql(TABELA_OFERTAS, "TABELA_OFERTAS")
     tabela_imagens = validar_identificador_sql(TABELA_IMAGENS, "TABELA_IMAGENS")
     coluna_codigo_oferta = validar_identificador_sql(COLUNA_CODIGO_OFERTA, "COLUNA_CODIGO_OFERTA")
@@ -625,7 +626,34 @@ def montar_sql_produtos_sem_imagem() -> str:
          WHERE i.{coluna_codigo_imagem} IS NULL
            AND o.{coluna_codigo_oferta} IS NOT NULL
            AND o.{coluna_descricao_oferta} IS NOT NULL
-         ORDER BY prodescricao
+    """
+
+
+def montar_sql_produtos_sem_imagem() -> str:
+    """Monta o SELECT completo das ofertas ativas que ainda não possuem imagem."""
+    return f"""
+        {montar_sql_base_produtos_sem_imagem()}
+         ORDER BY prodescricao, procodbase
+    """
+
+
+def montar_sql_lote_produtos_sem_imagem() -> str:
+    """Monta o SELECT paginado por chave para buscar produtos em lotes."""
+    return f"""
+        SELECT procodbase, prodescricao
+          FROM (
+            SELECT procodbase, prodescricao
+              FROM (
+                {montar_sql_base_produtos_sem_imagem()}
+              )
+             WHERE (
+                   :ultima_descricao IS NULL
+                OR prodescricao > :ultima_descricao
+                OR (prodescricao = :ultima_descricao AND procodbase > :ultimo_codigo)
+             )
+             ORDER BY prodescricao, procodbase
+          )
+         WHERE ROWNUM <= :limite_lote
     """
 
 
@@ -672,34 +700,104 @@ def conectar_banco():
     raise ValueError("DB_PROVIDER deve ser 'oracle' ou 'odbc'")
 
 
-def ler_produtos_banco() -> list[tuple[str, str]]:
+def normalizar_linhas_produtos(linhas) -> list[tuple[str, str]]:
+    produtos = []
+
+    for procodbase, prodescricao in linhas:
+        nome_busca = str(prodescricao or "").strip()
+        nome_arquivo = str(procodbase or "").strip()
+
+        if not nome_busca or not nome_arquivo:
+            continue
+
+        produtos.append((nome_busca, nome_arquivo))
+
+    return produtos
+
+
+def ler_lote_produtos_banco(
+    ultimo_produto: Optional[tuple[str, str]],
+    tamanho_lote: int,
+) -> list[tuple[str, str]]:
     """
-    Busca no banco as ofertas ativas sem imagem.
+    Busca um lote de ofertas ativas sem imagem no Oracle.
     Retorna tuplas (prodescricao_para_buscar, procodbase_para_salvar).
     """
-    produtos = []
-    sql = montar_sql_produtos_sem_imagem()
-
-    log.info("🗄️  Consultando ofertas ativas sem imagem no banco...")
+    sql = montar_sql_lote_produtos_sem_imagem()
+    parametros = {
+        "ultima_descricao": ultimo_produto[0] if ultimo_produto else None,
+        "ultimo_codigo": ultimo_produto[1] if ultimo_produto else None,
+        "limite_lote": tamanho_lote,
+    }
 
     conexao = conectar_banco()
     try:
         cursor = conexao.cursor()
+        cursor.arraysize = tamanho_lote
         try:
-            cursor.execute(sql)
-
-            for procodbase, prodescricao in cursor:
-                nome_busca = str(prodescricao or "").strip()
-                nome_arquivo = str(procodbase or "").strip()
-
-                if not nome_busca or not nome_arquivo:
-                    continue
-
-                produtos.append((nome_busca, nome_arquivo))
+            cursor.execute(sql, parametros)
+            return normalizar_linhas_produtos(cursor)
         finally:
             cursor.close()
     finally:
         conexao.close()
+
+
+def iterar_lotes_produtos_banco(tamanho_lote: int):
+    """
+    Busca produtos sem imagem em lotes, sem manter a lista completa em memoria.
+    No Oracle, cada lote usa uma consulta limitada; em outros provedores,
+    usa fetchmany para não carregar todos os registros no Python de uma vez.
+    """
+    log.info(f"🗄️  Consultando ofertas ativas sem imagem em lotes de até {tamanho_lote} produtos...")
+
+    if DB_PROVIDER == "oracle":
+        ultimo_produto = None
+
+        while True:
+            produtos = ler_lote_produtos_banco(ultimo_produto, tamanho_lote)
+
+            if not produtos:
+                break
+
+            yield produtos
+            ultimo_produto = produtos[-1]
+
+        return
+
+    sql = montar_sql_produtos_sem_imagem()
+    conexao = conectar_banco()
+    try:
+        cursor = conexao.cursor()
+        cursor.arraysize = tamanho_lote
+        try:
+            cursor.execute(sql)
+
+            while True:
+                linhas = cursor.fetchmany(tamanho_lote)
+
+                if not linhas:
+                    break
+
+                produtos = normalizar_linhas_produtos(linhas)
+
+                if produtos:
+                    yield produtos
+        finally:
+            cursor.close()
+    finally:
+        conexao.close()
+
+
+def ler_produtos_banco() -> list[tuple[str, str]]:
+    """
+    Busca no banco as ofertas ativas sem imagem.
+    Mantida para compatibilidade; o fluxo principal usa lotes.
+    """
+    produtos = []
+
+    for lote in iterar_lotes_produtos_banco(PRODUTOS_POR_LOTE):
+        produtos.extend(lote)
 
     return produtos
 
@@ -841,69 +939,80 @@ def main():
     pasta.mkdir(parents=True, exist_ok=True)
     tamanho_final = f"{LARGURA_FINAL_PX}x{ALTURA_FINAL_PX}"
 
-    produtos = ler_produtos_banco()
-    log.info(f"✅ {len(produtos)} ofertas ativas sem imagem encontradas no banco.")
     log.info(f"ℹ️  As imagens serão salvas em PNG com fundo transparente no tamanho {tamanho_final}.")
 
     sucesso    = 0
     falha      = 0
     ja_existia = 0
     redimensionadas = 0
-    imagens_prontas: dict[int, Path] = {}
+    total_produtos = 0
+    inseridas_banco = 0
+    ja_existiam_banco = 0
+    falhas_banco = 0
 
-    for nome_busca, nome_arquivo in tqdm(produtos, desc="Baixando imagens", unit="produto"):
-        # Salva sempre como .png (transparência exige PNG)
-        nome_final = sanitizar_nome(nome_arquivo)
-        nome_final = re.sub(r'\.(jpg|jpeg|png|webp)$', '', nome_final, flags=re.IGNORECASE)
-        nome_final += ".png"
+    for numero_lote, produtos in enumerate(iterar_lotes_produtos_banco(PRODUTOS_POR_LOTE), start=1):
+        total_produtos += len(produtos)
+        imagens_prontas: dict[int, Path] = {}
 
-        caminho_img = pasta / nome_final
+        log.info(f"✅ Lote {numero_lote}: {len(produtos)} ofertas ativas sem imagem encontradas no banco.")
 
-        # Pula se já foi baixada
-        if caminho_img.exists():
-            if ajustar_imagem_existente(caminho_img):
-                redimensionadas += 1
-                log.info(f"📐 Imagem ajustada para {tamanho_final}: {nome_final}")
+        for nome_busca, nome_arquivo in tqdm(produtos, desc=f"Baixando lote {numero_lote}", unit="produto"):
+            # Salva sempre como .png (transparência exige PNG)
+            nome_final = sanitizar_nome(nome_arquivo)
+            nome_final = re.sub(r'\.(jpg|jpeg|png|webp)$', '', nome_final, flags=re.IGNORECASE)
+            nome_final += ".png"
 
-            ja_existia += 1
-            registrar_imagem_pronta(imagens_prontas, nome_arquivo, caminho_img)
-            continue
+            caminho_img = pasta / nome_final
 
-        candidatos = buscar_candidatos_imagens(nome_busca)
+            # Pula se já foi baixada
+            if caminho_img.exists():
+                if ajustar_imagem_existente(caminho_img):
+                    redimensionadas += 1
+                    log.info(f"📐 Imagem ajustada para {tamanho_final}: {nome_final}")
 
-        baixou = False
-        for candidato in candidatos:
-            img = baixar_imagem(candidato.url)
-            if img is None:
-                continue
-
-            try:
-                log.info(
-                    f"🔄 Removendo fundo: '{nome_busca}' "
-                    f"({resumir_candidato(candidato)})..."
-                )
-                img_sem_fundo = remover_fundo(img)
-                img_final = redimensionar_para_tamanho_final(img_sem_fundo)
-                img_final.save(caminho_img, "PNG")
-                log.info(f"✔ '{nome_busca}' → {nome_final}")
-                sucesso += 1
-                baixou = True
+                ja_existia += 1
                 registrar_imagem_pronta(imagens_prontas, nome_arquivo, caminho_img)
-                break
-            except Exception as e:
-                log.warning(f"Erro ao remover fundo de '{nome_busca}': {e}")
                 continue
 
-        if not baixou:
-            log.warning(f"✘ Sem imagem para: '{nome_busca}' (arquivo esperado: {nome_final})")
-            falha += 1
+            candidatos = buscar_candidatos_imagens(nome_busca)
 
-        time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
+            baixou = False
+            for candidato in candidatos:
+                img = baixar_imagem(candidato.url)
+                if img is None:
+                    continue
 
-    inseridas_banco, ja_existiam_banco, falhas_banco = inserir_imagens_banco(imagens_prontas)
+                try:
+                    log.info(
+                        f"🔄 Removendo fundo: '{nome_busca}' "
+                        f"({resumir_candidato(candidato)})..."
+                    )
+                    img_sem_fundo = remover_fundo(img)
+                    img_final = redimensionar_para_tamanho_final(img_sem_fundo)
+                    img_final.save(caminho_img, "PNG")
+                    log.info(f"✔ '{nome_busca}' → {nome_final}")
+                    sucesso += 1
+                    baixou = True
+                    registrar_imagem_pronta(imagens_prontas, nome_arquivo, caminho_img)
+                    break
+                except Exception as e:
+                    log.warning(f"Erro ao remover fundo de '{nome_busca}': {e}")
+                    continue
+
+            if not baixou:
+                log.warning(f"✘ Sem imagem para: '{nome_busca}' (arquivo esperado: {nome_final})")
+                falha += 1
+
+            time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
+
+        inseridas_lote, ja_existiam_lote, falhas_lote = inserir_imagens_banco(imagens_prontas)
+        inseridas_banco += inseridas_lote
+        ja_existiam_banco += ja_existiam_lote
+        falhas_banco += falhas_lote
 
     log.info("=" * 50)
     log.info(f"🎉 CONCLUÍDO!")
+    log.info(f"   ✅ Produtos processados: {total_produtos}")
     log.info(f"   ✔ Baixados com sucesso : {sucesso}")
     log.info(f"   ⏭ Já existiam         : {ja_existia}")
     log.info(f"   📐 Ajustadas {tamanho_final}   : {redimensionadas}")
