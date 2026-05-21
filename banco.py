@@ -113,11 +113,14 @@ def conectar_banco():
             except Exception as e:
                 log.warning(f"Não foi possível inicializar Oracle Client: {e}")
 
-        return oracledb.connect(
+        log.info(f"Conectando ao banco Oracle: dsn={DB_DSN}")
+        conexao = oracledb.connect(
             user=DB_USER,
             password=DB_PASSWORD,
             dsn=DB_DSN,
         )
+        log.info("OK - Conexão com banco Oracle aberta.")
+        return conexao
 
     if DB_PROVIDER == "odbc":
         try:
@@ -131,7 +134,10 @@ def conectar_banco():
         if not ODBC_CONNECTION_STRING:
             raise ValueError("configure ODBC_CONNECTION_STRING no .env para conectar via ODBC")
 
-        return pyodbc.connect(ODBC_CONNECTION_STRING, timeout=DB_CONNECT_TIMEOUT)
+        log.info("Conectando ao banco via ODBC.")
+        conexao = pyodbc.connect(ODBC_CONNECTION_STRING, timeout=DB_CONNECT_TIMEOUT)
+        log.info("OK - Conexão com banco via ODBC aberta.")
+        return conexao
 
     raise ValueError("DB_PROVIDER deve ser 'oracle' ou 'odbc'")
 
@@ -144,6 +150,10 @@ def normalizar_linhas_produtos(linhas) -> list[tuple[str, str]]:
         nome_arquivo = str(procodbase or "").strip()
 
         if not nome_busca or not nome_arquivo:
+            log.warning(
+                f"Produto ignorado na leitura do banco: "
+                f"procodbase={procodbase!r}, prodescricao={prodescricao!r}"
+            )
             continue
 
         produtos.append((nome_busca, nome_arquivo))
@@ -165,18 +175,35 @@ def ler_lote_produtos_banco(
         "ultimo_codigo": ultimo_produto[1] if ultimo_produto else None,
         "limite_lote": tamanho_lote,
     }
+    log.info(
+        "Buscando produtos sem imagem no banco "
+        f"(limite={tamanho_lote}, ultimo_produto={ultimo_produto})."
+    )
 
-    conexao = conectar_banco()
+    try:
+        conexao = conectar_banco()
+    except Exception as e:
+        log.warning(f"Erro ao conectar ao banco para buscar produtos: {e}", exc_info=True)
+        raise
+
     try:
         cursor = conexao.cursor()
         cursor.arraysize = tamanho_lote
         try:
             cursor.execute(sql, parametros)
-            return normalizar_linhas_produtos(cursor)
+            produtos = normalizar_linhas_produtos(cursor)
+            log.info(f"Resultado da busca no banco: {len(produtos)} produto(s) sem imagem.")
+            for nome_busca, nome_arquivo in produtos:
+                log.info(f"Produto retornado pelo banco: '{nome_busca}' (PROCODBASE={nome_arquivo})")
+            return produtos
+        except Exception as e:
+            log.warning(f"Erro ao buscar produtos sem imagem no banco: {e}", exc_info=True)
+            raise
         finally:
             cursor.close()
     finally:
         conexao.close()
+        log.info("Conexão da busca de produtos fechada.")
 
 
 def iterar_lotes_produtos_banco(tamanho_lote: int):
@@ -185,7 +212,7 @@ def iterar_lotes_produtos_banco(tamanho_lote: int):
     No Oracle, cada lote usa uma consulta limitada; em outros provedores,
     usa fetchmany para não carregar todos os registros no Python de uma vez.
     """
-    log.info(f"🗄️  Consultando ofertas ativas sem imagem em lotes de até {tamanho_lote} produtos...")
+    log.info(f"Consultando ofertas ativas sem imagem em lotes de até {tamanho_lote} produtos...")
 
     if DB_PROVIDER == "oracle":
         ultimo_produto = None
@@ -194,6 +221,7 @@ def iterar_lotes_produtos_banco(tamanho_lote: int):
             produtos = ler_lote_produtos_banco(ultimo_produto, tamanho_lote)
 
             if not produtos:
+                log.info("Nenhum novo produto sem imagem encontrado no banco.")
                 break
 
             yield produtos
@@ -202,27 +230,41 @@ def iterar_lotes_produtos_banco(tamanho_lote: int):
         return
 
     sql = montar_sql_produtos_sem_imagem()
-    conexao = conectar_banco()
+    try:
+        conexao = conectar_banco()
+    except Exception as e:
+        log.warning(f"Erro ao conectar ao banco para buscar produtos: {e}", exc_info=True)
+        raise
+
     try:
         cursor = conexao.cursor()
         cursor.arraysize = tamanho_lote
         try:
+            log.info("Executando consulta de produtos sem imagem no banco.")
             cursor.execute(sql)
 
             while True:
                 linhas = cursor.fetchmany(tamanho_lote)
 
                 if not linhas:
+                    log.info("Nenhum novo produto sem imagem encontrado no banco.")
                     break
 
                 produtos = normalizar_linhas_produtos(linhas)
+                log.info(f"Resultado da busca no banco: {len(produtos)} produto(s) sem imagem.")
+                for nome_busca, nome_arquivo in produtos:
+                    log.info(f"Produto retornado pelo banco: '{nome_busca}' (PROCODBASE={nome_arquivo})")
 
                 if produtos:
                     yield produtos
+        except Exception as e:
+            log.warning(f"Erro ao buscar produtos sem imagem no banco: {e}", exc_info=True)
+            raise
         finally:
             cursor.close()
     finally:
         conexao.close()
+        log.info("Conexão da busca de produtos fechada.")
 
 
 def ler_produtos_banco() -> list[tuple[str, str]]:
@@ -302,10 +344,16 @@ def registrar_imagem_pronta(
 ) -> None:
     """Guarda uma imagem pronta para ser inserida no banco ao final."""
     if not caminho_img.exists():
+        log.warning(
+            f"Imagem não encontrada em disco para salvar no banco "
+            f"(PROCODBASE={codigo}): {caminho_img}"
+        )
         return
 
     try:
-        imagens_prontas[preparar_codigo_banco(codigo)] = caminho_img
+        codigo_banco = preparar_codigo_banco(codigo)
+        imagens_prontas[codigo_banco] = caminho_img
+        log.info(f"OK - Imagem pronta para salvar no banco: {caminho_img.name} (PROCODBASE={codigo_banco})")
     except ValueError as e:
         log.warning(f"{e}. Arquivo ignorado no insert: {caminho_img.name}")
 
@@ -316,6 +364,7 @@ def inserir_imagens_banco(imagens_prontas: dict[int, Path]) -> tuple[int, int, i
     Retorna (inseridas, ja_existiam_no_banco, falhas).
     """
     if not imagens_prontas:
+        log.info("Nenhuma imagem pronta para salvar no banco.")
         return 0, 0, 0
 
     sql = montar_sql_insert_imagem()
@@ -323,9 +372,14 @@ def inserir_imagens_banco(imagens_prontas: dict[int, Path]) -> tuple[int, int, i
     ja_existiam = 0
     falhas = 0
 
-    log.info(f"🗄️  Inserindo {len(imagens_prontas)} imagens na tabela {TABELA_IMAGENS}...")
+    log.info(f"Inserindo {len(imagens_prontas)} imagens na tabela {TABELA_IMAGENS}...")
 
-    conexao = conectar_banco()
+    try:
+        conexao = conectar_banco()
+    except Exception as e:
+        log.warning(f"Erro ao conectar ao banco para salvar imagens: {e}", exc_info=True)
+        raise
+
     try:
         cursor = conexao.cursor()
         try:
@@ -333,6 +387,7 @@ def inserir_imagens_banco(imagens_prontas: dict[int, Path]) -> tuple[int, int, i
 
             for codigo, caminho_img in imagens_prontas.items():
                 try:
+                    log.info(f"Salvando imagem no banco: {caminho_img.name} (PROCODBASE={codigo})")
                     imagem_bytes = caminho_img.read_bytes()
                     nome_arquivo = caminho_img.name[:50]
 
@@ -347,24 +402,36 @@ def inserir_imagens_banco(imagens_prontas: dict[int, Path]) -> tuple[int, int, i
                         },
                     )
                     inseridas += 1
+                    log.info(f"OK - Imagem salva no banco: {caminho_img.name} (PROCODBASE={codigo})")
                 except Exception as e:
                     if erro_chave_duplicada(e):
                         ja_existiam += 1
+                        log.info(
+                            f"Imagem já existia no banco: "
+                            f"{caminho_img.name} (PROCODBASE={codigo})"
+                        )
                         continue
 
                     falhas += 1
                     log.warning(
                         f"Não foi possível inserir '{caminho_img.name}' "
-                        f"(PROCODBASE={codigo}) no banco: {e}"
+                        f"(PROCODBASE={codigo}) no banco: {e}",
+                        exc_info=True,
                     )
 
             conexao.commit()
+            log.info(
+                f"OK - Commit do banco concluído: "
+                f"{inseridas} inserida(s), {ja_existiam} já existente(s), {falhas} falha(s)."
+            )
         finally:
             cursor.close()
-    except Exception:
+    except Exception as e:
+        log.warning(f"Erro geral ao salvar imagens no banco: {e}", exc_info=True)
         conexao.rollback()
         raise
     finally:
         conexao.close()
+        log.info("Conexão de insert de imagens fechada.")
 
     return inseridas, ja_existiam, falhas

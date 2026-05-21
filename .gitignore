@@ -1,6 +1,7 @@
 venv/
 imagens_produtos/
 instantclient_23_0/
+log/
 __pycache__/
 *.py[cod]
 *.txt

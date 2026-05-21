@@ -44,8 +44,8 @@ def main():
     pasta.mkdir(parents=True, exist_ok=True)
     tamanho_final = f"{LARGURA_FINAL_PX}x{ALTURA_FINAL_PX}"
 
-    log.info(f"ℹ️  As imagens serão salvas em PNG com fundo transparente no tamanho {tamanho_final}.")
-    log.info(f"📁 Pasta de saída das imagens: {pasta.resolve()}")
+    log.info(f"As imagens serão salvas em PNG com fundo transparente no tamanho {tamanho_final}.")
+    log.info(f"Pasta de saída das imagens: {pasta.resolve()}")
 
     sucesso    = 0
     falha      = 0
@@ -60,7 +60,7 @@ def main():
         total_produtos += len(produtos)
         imagens_prontas: dict[int, Path] = {}
 
-        log.info(f"✅ Lote {numero_lote}: {len(produtos)} ofertas ativas sem imagem encontradas no banco.")
+        log.info(f"Lote {numero_lote}: {len(produtos)} ofertas ativas sem imagem encontradas no banco.")
 
         for nome_busca, nome_arquivo in tqdm(produtos, desc=f"Baixando lote {numero_lote}", unit="produto"):
             # Salva sempre como .png (transparência exige PNG)
@@ -69,62 +69,93 @@ def main():
             nome_final += ".png"
 
             caminho_img = pasta / nome_final
+            log.info(
+                f"Produto em busca: '{nome_busca}' "
+                f"(PROCODBASE={nome_arquivo}, arquivo esperado={nome_final})"
+            )
 
             # Pula se já foi baixada
             if caminho_img.exists():
+                log.info(f"OK - Imagem já existe em disco para '{nome_busca}': {caminho_img}")
                 if ajustar_imagem_existente(caminho_img):
                     redimensionadas += 1
-                    log.info(f"📐 Imagem ajustada para {tamanho_final}: {nome_final}")
+                    log.info(f"Imagem ajustada para {tamanho_final}: {nome_final}")
 
                 ja_existia += 1
                 registrar_imagem_pronta(imagens_prontas, nome_arquivo, caminho_img)
                 continue
 
             candidatos = buscar_candidatos_imagens(nome_busca)
+            log.info(
+                f"Resultado da busca para '{nome_busca}': "
+                f"{len(candidatos)} candidato(s) confiável(is) encontrado(s)."
+            )
 
             baixou = False
             for candidato in candidatos:
+                log.info(
+                    f"Tentando baixar imagem para '{nome_busca}': "
+                    f"{resumir_candidato(candidato)} url={candidato.url}"
+                )
                 img = baixar_imagem(candidato.url)
                 if img is None:
+                    log.warning(
+                        f"Imagem não encontrada para '{nome_busca}' neste candidato: "
+                        f"{resumir_candidato(candidato)}"
+                    )
                     continue
 
                 try:
                     log.info(
-                        f"🔄 Removendo fundo: '{nome_busca}' "
+                        f"Removendo fundo: '{nome_busca}' "
                         f"({resumir_candidato(candidato)})..."
                     )
                     img_sem_fundo = remover_fundo(img)
                     img_final = redimensionar_para_tamanho_final(img_sem_fundo)
                     img_final.save(caminho_img, "PNG")
-                    log.info(f"✔ '{nome_busca}' → {nome_final}")
+                    log.info(f"OK - Imagem baixada e salva para '{nome_busca}': {caminho_img}")
+                    log.info(f"'{nome_busca}' → {nome_final}")
                     sucesso += 1
                     baixou = True
                     registrar_imagem_pronta(imagens_prontas, nome_arquivo, caminho_img)
                     break
                 except Exception as e:
-                    log.warning(f"Erro ao remover fundo de '{nome_busca}': {e}")
+                    log.warning(
+                        f"Erro ao processar/salvar imagem de '{nome_busca}' "
+                        f"(arquivo esperado: {nome_final}): {e}",
+                        exc_info=True,
+                    )
                     continue
 
             if not baixou:
-                log.warning(f"✘ Sem imagem para: '{nome_busca}' (arquivo esperado: {nome_final})")
+                log.warning(f"Imagem não encontrada para '{nome_busca}' (arquivo esperado: {nome_final})")
+                log.warning(f"Sem imagem para: '{nome_busca}' (arquivo esperado: {nome_final})")
                 falha += 1
 
             time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
 
+        log.info(
+            f"Salvando no banco as imagens prontas do lote {numero_lote}: "
+            f"{len(imagens_prontas)} imagem(ns)."
+        )
         inseridas_lote, ja_existiam_lote, falhas_lote = inserir_imagens_banco(imagens_prontas)
         inseridas_banco += inseridas_lote
         ja_existiam_banco += ja_existiam_lote
         falhas_banco += falhas_lote
+        log.info(
+            f"Resultado do banco no lote {numero_lote}: "
+            f"{inseridas_lote} salva(s), {ja_existiam_lote} já existente(s), {falhas_lote} falha(s)."
+        )
 
     log.info("=" * 50)
-    log.info(f"🎉 CONCLUÍDO!")
-    log.info(f"   ✅ Produtos processados: {total_produtos}")
-    log.info(f"   ✔ Baixados com sucesso : {sucesso}")
-    log.info(f"   ⏭ Já existiam         : {ja_existia}")
-    log.info(f"   📐 Ajustadas {tamanho_final}   : {redimensionadas}")
-    log.info(f"   ✘ Falhas               : {falha}")
-    log.info(f"   🗄️  Inseridas no banco : {inseridas_banco}")
-    log.info(f"   🗄️  Já estavam no banco: {ja_existiam_banco}")
-    log.info(f"   🗄️  Falhas no banco    : {falhas_banco}")
-    log.info(f"   📁 Imagens salvas em   : {pasta.resolve()}")
+    log.info(f" CONCLUÍDO!")
+    log.info(f"    Produtos processados: {total_produtos}")
+    log.info(f"    Baixados com sucesso : {sucesso}")
+    log.info(f"    Já existiam         : {ja_existia}")
+    log.info(f"    Ajustadas {tamanho_final}   : {redimensionadas}")
+    log.info(f"    Falhas               : {falha}")
+    log.info(f"    Inseridas no banco : {inseridas_banco}")
+    log.info(f"    Já estavam no banco: {ja_existiam_banco}")
+    log.info(f"    Falhas no banco    : {falhas_banco}")
+    log.info(f"    Imagens salvas em   : {pasta.resolve()}")
     log.info("=" * 50)

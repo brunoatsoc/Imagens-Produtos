@@ -279,6 +279,7 @@ def buscar_candidatos_imagens(produto: str, max_resultados: int = MAX_RESULTADOS
     """
     consultas = montar_consultas_busca(produto)
     melhor_descartado = None
+    log.info(f"Buscando imagem para produto '{produto}'. Consultas: {', '.join(consultas)}")
 
     for tentativa in range(3):
         try:
@@ -295,7 +296,10 @@ def buscar_candidatos_imagens(produto: str, max_resultados: int = MAX_RESULTADOS
                         max_results=max_resultados,
                     )
 
+                    resultados_consulta = 0
+                    candidatos_consulta = 0
                     for resultado in resultados:
+                        resultados_consulta += 1
                         url = resultado.get("image")
 
                         if not url:
@@ -321,16 +325,28 @@ def buscar_candidatos_imagens(produto: str, max_resultados: int = MAX_RESULTADOS
                             altura=inteiro_seguro(resultado.get("height")),
                         )
                         candidatos.append(candidato)
+                        candidatos_consulta += 1
+
+                    log.info(
+                        f"Consulta '{consulta}' para '{produto}' retornou "
+                        f"{resultados_consulta} resultado(s), "
+                        f"{candidatos_consulta} candidato(s) válido(s) para pontuação."
+                    )
 
             candidatos.sort(key=lambda c: c.score, reverse=True)
             candidatos_confiaveis = [c for c in candidatos if c.score >= MIN_SCORE_IMAGEM]
+            log.info(
+                f"Resultado da busca para '{produto}': "
+                f"{len(candidatos)} candidato(s) avaliado(s), "
+                f"{len(candidatos_confiaveis)} confiável(is)."
+            )
 
             if candidatos:
                 melhor_descartado = candidatos[0]
 
             if candidatos_confiaveis:
                 log.info(
-                    f"🔎 Melhor candidato para '{produto}': "
+                    f"Melhor candidato para '{produto}': "
                     f"{resumir_candidato(candidatos_confiaveis[0])}"
                 )
                 return candidatos_confiaveis
@@ -340,15 +356,18 @@ def buscar_candidatos_imagens(produto: str, max_resultados: int = MAX_RESULTADOS
                     f"Nenhum candidato confiável para '{produto}'. "
                     f"Melhor encontrado: {resumir_candidato(melhor_descartado)}"
                 )
+                log.warning(f"Imagem não encontrada para '{produto}': nenhum candidato atingiu a pontuação mínima.")
                 return []
 
             log.warning(f"Nenhum resultado de imagem encontrado para '{produto}'.")
+            log.warning(f"Imagem não encontrada para '{produto}': busca não retornou resultados.")
             return []
 
         except Exception as e:
             log.warning(
                 f"Tentativa {tentativa + 1}/3 falhou para "
-                f"'{produto}': {e}"
+                f"'{produto}': {e}",
+                exc_info=True,
             )
 
             # espera progressiva
@@ -360,6 +379,7 @@ def buscar_candidatos_imagens(produto: str, max_resultados: int = MAX_RESULTADOS
 def baixar_imagem(url: str) -> Image.Image | None:
     """Baixa uma imagem e retorna o objeto PIL, ou None em caso de falha."""
     headers = random.choice(HEADERS_LIST)
+    log.info(f"Baixando imagem candidata: {url}")
     try:
         resp = requests.get(url, headers=headers, timeout=15)
         resp.raise_for_status()
@@ -367,6 +387,10 @@ def baixar_imagem(url: str) -> Image.Image | None:
         conteudo = resp.content
 
         if len(conteudo) < TAMANHO_MIN_KB * 1024:
+            log.warning(
+                f"Imagem não encontrada/descartada em {url}: "
+                f"arquivo com {len(conteudo) // 1024} KB, mínimo {TAMANHO_MIN_KB} KB."
+            )
             return None
 
         img = Image.open(BytesIO(conteudo)).convert("RGBA")
@@ -375,12 +399,25 @@ def baixar_imagem(url: str) -> Image.Image | None:
         maior = max(largura, altura)
 
         if largura < LARGURA_MIN_PX or altura < ALTURA_MIN_PX:
+            log.warning(
+                f"Imagem não encontrada/descartada em {url}: "
+                f"dimensões {largura}x{altura}, mínimo {LARGURA_MIN_PX}x{ALTURA_MIN_PX}."
+            )
             return None
 
         if menor and maior / menor > PROPORCAO_MAX:
+            log.warning(
+                f"Imagem não encontrada/descartada em {url}: "
+                f"proporção {maior / menor:.2f}, máximo {PROPORCAO_MAX}."
+            )
             return None
 
+        log.info(
+            f"OK - Download da imagem concluído: {url} "
+            f"({largura}x{altura}, {len(conteudo) // 1024} KB)."
+        )
         return img
 
-    except Exception:
+    except Exception as e:
+        log.warning(f"Erro ao baixar imagem em {url}: {e}", exc_info=True)
         return None

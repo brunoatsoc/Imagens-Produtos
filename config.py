@@ -2,6 +2,7 @@ import logging
 import os
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -81,19 +82,28 @@ def resolver_pasta_saida(caminho: str) -> Path:
 
 
 def configurar_logging() -> None:
+    pasta_log = BASE_DIR / "log"
+    pasta_log.mkdir(parents=True, exist_ok=True)
+    nome_arquivo_log = f"intelliimages_{datetime.now():%Y%m%d_%H%M%S}.log"
+    caminho_arquivo_log = pasta_log / nome_arquivo_log
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[
-            logging.StreamHandler()
+            logging.StreamHandler(),
+            logging.FileHandler(caminho_arquivo_log, encoding="utf-8"),
         ]
     )
+
+    logging.getLogger(__name__).info(f"Logs salvos em: {caminho_arquivo_log.resolve()}")
 
 
 carregar_dotenv()
 
 # ─────────────────────────────────────────────
-#  ⚙️  CONFIGURAÇÕES — AJUSTE AQUI
+# CONFIGURAÇÕES
 # ─────────────────────────────────────────────
 PASTA_SAIDA     = os.getenv("PASTA_SAIDA", "imagens_produtos")   # Pasta onde as imagens serão salvas
 DELAY_MIN       = 1.5                  # Espera mínima entre buscas (segundos)
