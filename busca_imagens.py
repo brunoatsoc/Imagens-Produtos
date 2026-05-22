@@ -15,6 +15,8 @@ from config import (
     ALTURA_MIN_PX,
     LARGURA_MIN_PX,
     MAX_RESULTADOS_BUSCA,
+    MIN_COBERTURA_IDENTIDADE,
+    MIN_COBERTURA_TOKENS,
     MIN_SCORE_IMAGEM,
     PROPORCAO_MAX,
     TAMANHO_MIN_KB,
@@ -80,7 +82,7 @@ ABREVIACOES_BUSCA = [
 STOPWORDS_BUSCA = {
     "a", "as", "o", "os", "de", "da", "das", "do", "dos", "e", "em",
     "com", "sem", "para", "por", "un", "unidade", "pacote", "produto",
-    "foto", "imagem",
+    "foto", "imagem", "unidades",
 }
 
 TERMOS_NEGATIVOS = {
@@ -94,6 +96,29 @@ FONTES_CONFIAVEIS = {
     "drogasil", "epocacosmeticos", "magazineluiza", "mercado livre",
     "mercadolivre", "pao de acucar", "paodeacucar", "supermercado",
 }
+
+TERMOS_GENERICOS_IDENTIDADE = STOPWORDS_BUSCA | {
+    "achocolatado", "agua", "alimento", "alimentos", "anel", "aneis",
+    "bebida", "bebidas", "biscoito", "bolacha", "caixa", "cerveja",
+    "cebola", "coco", "condicionador", "congelada", "congelado",
+    "detergente", "embalagem", "frasco", "frango", "garrafa", "kit",
+    "lasanha", "lata", "limpador", "pastilha", "perfumado", "po",
+    "pote", "refresco", "sache", "salgada", "salgado", "sanitario",
+    "termica", "termico", "toalha", "umedecida", "umedecido", "vinho",
+}
+
+
+@dataclass(frozen=True)
+class AnaliseRelevancia:
+    tokens_produto: tuple[str, ...]
+    tokens_encontrados: tuple[str, ...]
+    tokens_identidade: tuple[str, ...]
+    tokens_identidade_encontrados: tuple[str, ...]
+    tokens_medida: tuple[str, ...]
+    tokens_medida_encontrados: tuple[str, ...]
+    cobertura: float
+    cobertura_identidade: float
+    motivo_rejeicao: str = ""
 
 
 @dataclass(frozen=True)
@@ -116,6 +141,7 @@ def normalizar_espacos(texto: str) -> str:
 def preparar_produto_para_consulta(produto: str) -> str:
     """Deixa o nome do cadastro mais legível para motores de busca."""
     texto = normalizar_espacos(produto)
+    texto = re.sub(r"(?<=[A-Za-zÀ-ÿ])[./](?=[A-Za-zÀ-ÿ])", " ", texto)
     texto = re.sub(r"(?<=[A-Za-zÀ-ÿ])(?=\d)", " ", texto)
     texto = re.sub(r"(?<=\d)(?=[A-Za-zÀ-ÿ])", " ", texto)
     texto = re.sub(r"(\d+)\s*[xX]\s*(\d+)", r"\1x\2", texto)
@@ -164,6 +190,122 @@ def tokenizar_relevantes(produto: str) -> list[str]:
     return tokens
 
 
+def variantes_token(token: str) -> set[str]:
+    """Gera pequenas variações para comparar plural/singular sem stemming pesado."""
+    variantes = {token}
+
+    if len(token) > 4 and token.endswith("s"):
+        variantes.add(token[:-1])
+    elif len(token) > 4:
+        variantes.add(f"{token}s")
+
+    return variantes
+
+
+def token_presente(token: str, tokens_texto: set[str]) -> bool:
+    """Verifica se um token do produto aparece nos metadados do resultado."""
+    if variantes_token(token) & tokens_texto:
+        return True
+
+    if token.isdigit():
+        return any(re.fullmatch(rf"{re.escape(token)}(?:un|und|unidade|unidades)?", t) for t in tokens_texto)
+
+    return False
+
+
+def token_e_medida(token: str) -> bool:
+    return any(c.isdigit() for c in token)
+
+
+def tokens_de_identidade(tokens_produto: list[str]) -> list[str]:
+    """Separa marca/linha/variante de termos de categoria e embalagem."""
+    return [
+        token
+        for token in tokens_produto
+        if not token_e_medida(token) and token not in TERMOS_GENERICOS_IDENTIDADE
+    ]
+
+
+def definir_motivo_rejeicao(
+    tokens_produto: list[str],
+    tokens_identidade: list[str],
+    tokens_medida: list[str],
+    tokens_encontrados: list[str],
+    tokens_identidade_encontrados: list[str],
+    tokens_medida_encontrados: list[str],
+    cobertura: float,
+    cobertura_identidade: float,
+) -> str:
+    """Aplica os cortes mínimos antes da pontuação final."""
+    if not tokens_produto:
+        return "sem tokens do produto"
+
+    if tokens_medida and len(tokens_medida_encontrados) < len(tokens_medida):
+        return "medida ausente ou divergente"
+
+    if tokens_identidade and not tokens_identidade_encontrados:
+        return "sem token de identidade"
+
+    if tokens_identidade and cobertura_identidade < MIN_COBERTURA_IDENTIDADE:
+        return "baixa cobertura de identidade"
+
+    if len(tokens_produto) >= 4 and cobertura < MIN_COBERTURA_TOKENS:
+        return "baixa cobertura geral"
+
+    return ""
+
+
+def analisar_relevancia_resultado(produto: str, resultado: dict) -> AnaliseRelevancia:
+    """Compara a descrição do produto com os metadados retornados pelo buscador."""
+    campos = (
+        resultado.get("title", ""),
+        resultado.get("source", ""),
+        resultado.get("url", ""),
+        resultado.get("image", ""),
+    )
+    texto_original = " ".join(str(campo or "") for campo in campos)
+    texto_normalizado = normalizar_texto(texto_original)
+    tokens_texto = set(texto_normalizado.split())
+    tokens_produto = tokenizar_relevantes(produto)
+    tokens_identidade = tokens_de_identidade(tokens_produto)
+    tokens_medida = [token for token in tokens_produto if token_e_medida(token)]
+    tokens_encontrados = [token for token in tokens_produto if token_presente(token, tokens_texto)]
+    tokens_identidade_encontrados = [
+        token for token in tokens_identidade if token_presente(token, tokens_texto)
+    ]
+    tokens_medida_encontrados = [
+        token for token in tokens_medida if token_presente(token, tokens_texto)
+    ]
+    cobertura = len(tokens_encontrados) / len(tokens_produto) if tokens_produto else 0
+    cobertura_identidade = (
+        len(tokens_identidade_encontrados) / len(tokens_identidade)
+        if tokens_identidade
+        else 1
+    )
+    motivo_rejeicao = definir_motivo_rejeicao(
+        tokens_produto,
+        tokens_identidade,
+        tokens_medida,
+        tokens_encontrados,
+        tokens_identidade_encontrados,
+        tokens_medida_encontrados,
+        cobertura,
+        cobertura_identidade,
+    )
+
+    return AnaliseRelevancia(
+        tokens_produto=tuple(tokens_produto),
+        tokens_encontrados=tuple(tokens_encontrados),
+        tokens_identidade=tuple(tokens_identidade),
+        tokens_identidade_encontrados=tuple(tokens_identidade_encontrados),
+        tokens_medida=tuple(tokens_medida),
+        tokens_medida_encontrados=tuple(tokens_medida_encontrados),
+        cobertura=cobertura,
+        cobertura_identidade=cobertura_identidade,
+        motivo_rejeicao=motivo_rejeicao,
+    )
+
+
 def inteiro_seguro(valor) -> int:
     try:
         return int(str(valor).strip())
@@ -178,8 +320,17 @@ def dominio_de(url: str) -> str:
     return dominio
 
 
-def pontuar_resultado(produto: str, resultado: dict) -> int:
+def pontuar_resultado(
+    produto: str,
+    resultado: dict,
+    analise: AnaliseRelevancia | None = None,
+) -> int:
     """Dá uma nota ao resultado usando metadados, não só a ordem do buscador."""
+    analise = analise or analisar_relevancia_resultado(produto, resultado)
+
+    if analise.motivo_rejeicao:
+        return 0
+
     campos = (
         resultado.get("title", ""),
         resultado.get("source", ""),
@@ -188,15 +339,10 @@ def pontuar_resultado(produto: str, resultado: dict) -> int:
     )
     texto_original = " ".join(str(campo or "") for campo in campos)
     texto_normalizado = normalizar_texto(texto_original)
-    tokens_texto = set(texto_normalizado.split())
-    tokens_produto = tokenizar_relevantes(produto)
-
-    if not tokens_produto:
-        return 0
-
-    tokens_encontrados = [token for token in tokens_produto if token in tokens_texto]
-    cobertura = len(tokens_encontrados) / len(tokens_produto)
-    score = len(tokens_encontrados) * 4 + int(cobertura * 20)
+    score = len(analise.tokens_encontrados) * 5 + int(analise.cobertura * 25)
+    score += len(analise.tokens_identidade_encontrados) * 6
+    score += int(analise.cobertura_identidade * 15)
+    score += len(analise.tokens_medida_encontrados) * 5
 
     consulta_original = normalizar_texto(preparar_produto_para_consulta(produto))
     consulta_expandida = normalizar_texto(expandir_abreviacoes(produto))
@@ -205,10 +351,6 @@ def pontuar_resultado(produto: str, resultado: dict) -> int:
         score += 25
     elif consulta_original and consulta_original in texto_normalizado:
         score += 20
-
-    for token in tokens_produto:
-        if any(c.isdigit() for c in token) and token not in tokens_texto:
-            score -= 4
 
     if any(termo in texto_normalizado for termo in TERMOS_NEGATIVOS):
         score -= 12
@@ -287,11 +429,13 @@ def buscar_candidatos_imagens(produto: str, max_resultados: int = MAX_RESULTADOS
             urls_vistas = set()
 
             with DDGS(timeout=20) as ddgs:
+                descartes_por_motivo = {}
+
                 for consulta in consultas:
                     resultados = ddgs.images(
                         consulta,
                         region="br-pt",
-                        safesearch="off",
+                        safesearch="moderate",
                         type_image="photo",
                         max_results=max_resultados,
                     )
@@ -312,7 +456,13 @@ def buscar_candidatos_imagens(produto: str, max_resultados: int = MAX_RESULTADOS
                             continue
 
                         urls_vistas.add(url)
-                        score = pontuar_resultado(produto, resultado)
+                        analise = analisar_relevancia_resultado(produto, resultado)
+                        score = pontuar_resultado(produto, resultado, analise)
+
+                        if analise.motivo_rejeicao:
+                            descartes_por_motivo[analise.motivo_rejeicao] = (
+                                descartes_por_motivo.get(analise.motivo_rejeicao, 0) + 1
+                            )
 
                         candidato = CandidatoImagem(
                             url=url,
@@ -340,6 +490,17 @@ def buscar_candidatos_imagens(produto: str, max_resultados: int = MAX_RESULTADOS
                 f"{len(candidatos)} candidato(s) avaliado(s), "
                 f"{len(candidatos_confiaveis)} confiável(is)."
             )
+
+            if descartes_por_motivo:
+                resumo_descartes = ", ".join(
+                    f"{qtd} por {motivo}"
+                    for motivo, qtd in sorted(
+                        descartes_por_motivo.items(),
+                        key=lambda item: item[1],
+                        reverse=True,
+                    )
+                )
+                log.info(f"Candidatos descartados para '{produto}': {resumo_descartes}.")
 
             if candidatos:
                 melhor_descartado = candidatos[0]
