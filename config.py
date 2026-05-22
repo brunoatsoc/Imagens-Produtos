@@ -70,6 +70,34 @@ def obter_env_int(nome: str, padrao: int, minimo: Optional[int] = None) -> int:
     return numero
 
 
+def obter_env_float(
+    nome: str,
+    padrao: float,
+    minimo: Optional[float] = None,
+    maximo: Optional[float] = None,
+) -> float:
+    """Le e valida variaveis de ambiente numericas com casas decimais."""
+    valor = os.getenv(nome, "")
+
+    if not valor.strip():
+        numero = padrao
+    else:
+        try:
+            numero = float(valor.strip().replace(",", "."))
+        except ValueError as e:
+            raise ValueError(
+                f"{nome} deve ser um numero decimal; valor recebido: {valor!r}"
+            ) from e
+
+    if minimo is not None and numero < minimo:
+        raise ValueError(f"{nome} deve ser maior ou igual a {minimo}; valor recebido: {numero}")
+
+    if maximo is not None and numero > maximo:
+        raise ValueError(f"{nome} deve ser menor ou igual a {maximo}; valor recebido: {numero}")
+
+    return numero
+
+
 def resolver_pasta_saida(caminho: str) -> Path:
     """Resolve a pasta de saida a partir da pasta do script/executavel."""
     caminho = str(caminho or "").strip() or "imagens_produtos"
@@ -84,7 +112,7 @@ def resolver_pasta_saida(caminho: str) -> Path:
 def configurar_logging() -> None:
     pasta_log = BASE_DIR / "log"
     pasta_log.mkdir(parents=True, exist_ok=True)
-    nome_arquivo_log = f"intelliimages_{datetime.now():%Y%m%d_%H%M%S}.log"
+    nome_arquivo_log = f"intellisysimages_{datetime.now():%Y%m%d_%H%M%S}.log"
     caminho_arquivo_log = pasta_log / nome_arquivo_log
 
     logging.basicConfig(
@@ -113,7 +141,9 @@ LARGURA_MIN_PX  = 180                  # Ignora imagens muito pequenas
 ALTURA_MIN_PX   = 180                  # Ignora imagens muito pequenas
 PROPORCAO_MAX   = 5.0                  # Ignora banners/imagens muito esticadas
 MAX_RESULTADOS_BUSCA = 30              # Quantidade de resultados avaliados por consulta
-MIN_SCORE_IMAGEM = 18                  # Pontuação mínima para aceitar uma imagem
+MIN_SCORE_IMAGEM = obter_env_int("MIN_SCORE_IMAGEM", 35, minimo=0)  # Pontuação mínima para aceitar uma imagem
+MIN_COBERTURA_TOKENS = obter_env_float("MIN_COBERTURA_TOKENS", 0.55, minimo=0.0, maximo=1.0)
+MIN_COBERTURA_IDENTIDADE = obter_env_float("MIN_COBERTURA_IDENTIDADE", 0.60, minimo=0.0, maximo=1.0)
 TERMO_EXTRA     = "foto produto embalagem"  # Termo extra para refinar a busca
 PRODUTOS_POR_LOTE = obter_env_int("PRODUTOS_POR_LOTE", 100, minimo=1)  # Quantidade de produtos consultados por vez
 LARGURA_FINAL_PX = obter_env_int("LARGURA_FINAL_PX", 406, minimo=1)  # Largura final das imagens salvas
