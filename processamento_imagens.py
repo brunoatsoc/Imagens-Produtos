@@ -1,24 +1,12 @@
 import logging
-from io import BytesIO
 from pathlib import Path
 
 from PIL import Image
-from rembg import remove
 
 from config import ALTURA_FINAL_PX, LARGURA_FINAL_PX, MARGEM_FINAL_PX
 
 
 log = logging.getLogger(__name__)
-
-
-def remover_fundo(img: Image.Image) -> Image.Image:
-    """Remove o fundo da imagem usando rembg e retorna imagem com transparência."""
-    buffer_entrada = BytesIO()
-    img.save(buffer_entrada, format="PNG")
-    buffer_entrada.seek(0)
-
-    resultado = remove(buffer_entrada.read())
-    return Image.open(BytesIO(resultado)).convert("RGBA")
 
 
 def redimensionar_para_tamanho_final(img: Image.Image) -> Image.Image:
@@ -28,7 +16,9 @@ def redimensionar_para_tamanho_final(img: Image.Image) -> Image.Image:
     altura_final = ALTURA_FINAL_PX
     margem = max(0, MARGEM_FINAL_PX)
 
-    bbox = img.getchannel("A").getbbox()
+    alpha = img.getchannel("A")
+    mask = alpha.point(lambda p: 255 if p > 15 else 0)
+    bbox = mask.getbbox()
     if not bbox:
         return Image.new("RGBA", (largura_final, altura_final), (255, 255, 255, 0))
 

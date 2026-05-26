@@ -4,7 +4,7 @@
 =============================================================
   Como usar:
   1. Instale as dependências:
-       pip install requests pillow tqdm rembg ddgs oracledb
+       pip install requests pillow tqdm ddgs oracledb
 
   2. Configure o acesso ao banco no arquivo .env, na mesma pasta do script:
        DB_PROVIDER=oracle
@@ -29,11 +29,9 @@
             python3 -m venv venv
             source venv/bin/activate
         Depois rode os comandos de instalação dos pacotes normalmente
-            pip install requests pillow tqdm rembg ddgs oracledb
-            pip install "rembg[cpu]"
+            pip install requests pillow tqdm ddgs oracledb
 
-  ATENÇÃO: As imagens serão salvas em PNG (com fundo transparente).
-           O formato JPG não suporta transparência.
+  ATENÇÃO: As imagens serão salvas em PNG com o fundo original preservado.
 =============================================================
 """
 

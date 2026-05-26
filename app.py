@@ -24,7 +24,6 @@ from config import (
 from processamento_imagens import (
     ajustar_imagem_existente,
     redimensionar_para_tamanho_final,
-    remover_fundo,
 )
 
 
@@ -44,7 +43,7 @@ def main():
     pasta.mkdir(parents=True, exist_ok=True)
     tamanho_final = f"{LARGURA_FINAL_PX}x{ALTURA_FINAL_PX}"
 
-    log.info(f"As imagens serão salvas em PNG com fundo transparente no tamanho {tamanho_final}.")
+    log.info(f"As imagens serão salvas em PNG com fundo original no tamanho {tamanho_final}.")
     log.info(f"Pasta de saída das imagens: {pasta.resolve()}")
 
     sucesso    = 0
@@ -63,7 +62,7 @@ def main():
         log.info(f"Lote {numero_lote}: {len(produtos)} ofertas ativas sem imagem encontradas no banco.")
 
         for nome_busca, nome_arquivo in tqdm(produtos, desc=f"Baixando lote {numero_lote}", unit="produto"):
-            # Salva sempre como .png (transparência exige PNG)
+            # Salva sempre como .png para manter o formato esperado pelo fluxo atual.
             nome_final = sanitizar_nome(nome_arquivo)
             nome_final = re.sub(r'\.(jpg|jpeg|png|webp)$', '', nome_final, flags=re.IGNORECASE)
             nome_final += ".png"
@@ -107,11 +106,10 @@ def main():
 
                 try:
                     log.info(
-                        f"Removendo fundo: '{nome_busca}' "
+                        f"Redimensionando imagem: '{nome_busca}' "
                         f"({resumir_candidato(candidato)})..."
                     )
-                    img_sem_fundo = remover_fundo(img)
-                    img_final = redimensionar_para_tamanho_final(img_sem_fundo)
+                    img_final = redimensionar_para_tamanho_final(img)
                     img_final.save(caminho_img, "PNG")
                     log.info(f"OK - Imagem baixada e salva para '{nome_busca}': {caminho_img}")
                     log.info(f"'{nome_busca}' → {nome_final}")

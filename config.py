@@ -148,7 +148,7 @@ TERMO_EXTRA     = "foto produto embalagem"  # Termo extra para refinar a busca
 PRODUTOS_POR_LOTE = obter_env_int("PRODUTOS_POR_LOTE", 100, minimo=1)  # Quantidade de produtos consultados por vez
 LARGURA_FINAL_PX = obter_env_int("LARGURA_FINAL_PX", 406, minimo=1)  # Largura final das imagens salvas
 ALTURA_FINAL_PX  = obter_env_int("ALTURA_FINAL_PX", 406, minimo=1)   # Altura final das imagens salvas
-MARGEM_FINAL_PX  = 12                  # Margem transparente ao redor do produto
+MARGEM_FINAL_PX  = 12                  # Margem ao redor da imagem no canvas final
 
 # Banco de dados
 DB_PROVIDER     = os.getenv("DB_PROVIDER", "oracle").strip().lower()
