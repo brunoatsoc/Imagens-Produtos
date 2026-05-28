@@ -3,35 +3,30 @@ from io import BytesIO
 from pathlib import Path
 
 from PIL import Image
-from rembg import remove, new_session
+from rembg import remove, new_session # Importamos o new_session
 
 from config import ALTURA_FINAL_PX, LARGURA_FINAL_PX, MARGEM_FINAL_PX
 
+
 log = logging.getLogger(__name__)
 
-# Alteramos o modelo para 'briarmbg'. 
-# Este modelo (Bria AI 1.4) é o atual estado da arte open-source para 
-# remoção de fundo e entrega resultados comparáveis ao Adobe Express/Photoroom.
-session_rembg = new_session("bria-rmbg")
+# Inicializamos a sessão do modelo fora da função para melhor performance.
+# O modelo 'isnet-general-use' é muito superior para fotos de produtos.
+# Obs: Na primeira execução, o rembg fará o download automático deste modelo (~170MB).
+session_rembg = new_session("isnet-general-use")
 
 
 def remover_fundo(img: Image.Image) -> Image.Image:
-    """Remove o fundo da imagem de forma otimizada para velocidade."""
-    
-    # Pré-redimensionamento: se a imagem for enorme, diminuímos antes de processar
-    limite_tamanho = 1024
-    if max(img.size) > limite_tamanho:
-        # thumbnail altera a imagem mantendo a proporção (é muito rápido)
-        img.thumbnail((limite_tamanho, limite_tamanho))
-
+    """Remove o fundo da imagem usando rembg e retorna imagem com transparência."""
     buffer_entrada = BytesIO()
     img.save(buffer_entrada, format="PNG")
     buffer_entrada.seek(0)
 
+    # Passamos a sessão e ativamos o pós-processamento da máscara
     resultado = remove(
         buffer_entrada.read(),
         session=session_rembg,
-        post_process_mask=False # Desativar isso economiza um bom tempo
+        post_process_mask=True 
     )
     return Image.open(BytesIO(resultado)).convert("RGBA")
 
