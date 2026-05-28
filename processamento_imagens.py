@@ -3,21 +3,36 @@ from io import BytesIO
 from pathlib import Path
 
 from PIL import Image
-from rembg import remove
+from rembg import remove, new_session
 
 from config import ALTURA_FINAL_PX, LARGURA_FINAL_PX, MARGEM_FINAL_PX
 
-
 log = logging.getLogger(__name__)
+
+# Alteramos o modelo para 'briarmbg'. 
+# Este modelo (Bria AI 1.4) é o atual estado da arte open-source para 
+# remoção de fundo e entrega resultados comparáveis ao Adobe Express/Photoroom.
+session_rembg = new_session("bria-rmbg")
 
 
 def remover_fundo(img: Image.Image) -> Image.Image:
-    """Remove o fundo da imagem usando rembg e retorna imagem com transparência."""
+    """Remove o fundo da imagem de forma otimizada para velocidade."""
+    
+    # Pré-redimensionamento: se a imagem for enorme, diminuímos antes de processar
+    limite_tamanho = 1024
+    if max(img.size) > limite_tamanho:
+        # thumbnail altera a imagem mantendo a proporção (é muito rápido)
+        img.thumbnail((limite_tamanho, limite_tamanho))
+
     buffer_entrada = BytesIO()
     img.save(buffer_entrada, format="PNG")
     buffer_entrada.seek(0)
 
-    resultado = remove(buffer_entrada.read())
+    resultado = remove(
+        buffer_entrada.read(),
+        session=session_rembg,
+        post_process_mask=False # Desativar isso economiza um bom tempo
+    )
     return Image.open(BytesIO(resultado)).convert("RGBA")
 
 
