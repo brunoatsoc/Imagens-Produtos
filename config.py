@@ -134,6 +134,7 @@ carregar_dotenv()
 # CONFIGURAÇÕES
 # ─────────────────────────────────────────────
 PASTA_SAIDA     = os.getenv("PASTA_SAIDA", "imagens_produtos")   # Pasta onde as imagens serão salvas
+PORTA_SERVIDOR_GERENCIAMENTO = obter_env_int("PORTA_SERVIDOR_GERENCIAMENTO", 8000, minimo=0)
 DELAY_MIN       = 1.5                  # Espera mínima entre buscas (segundos)
 DELAY_MAX       = 3.5                  # Espera máxima entre buscas (segundos)
 TAMANHO_MIN_KB  = 5                    # Ignora imagens menores que X KB

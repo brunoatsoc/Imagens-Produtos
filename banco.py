@@ -1,7 +1,8 @@
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from config import (
     COLUNA_CODIGO_IMAGEM,
@@ -23,6 +24,27 @@ from config import (
 
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ResultadoPersistenciaImagem:
+    codigo: int
+    caminho: Path
+    inserida: bool = False
+    ja_existia: bool = False
+    erro: str = ""
+
+    @property
+    def sucesso(self) -> bool:
+        return self.inserida or self.ja_existia
+
+    @property
+    def status(self) -> str:
+        if self.inserida:
+            return "inserida"
+        if self.ja_existia:
+            return "ja_existia"
+        return "falha"
 
 
 def validar_identificador_sql(nome: str, campo: str) -> str:
@@ -307,6 +329,18 @@ def montar_sql_insert_imagem() -> str:
     """
 
 
+def montar_sql_verificar_imagem() -> str:
+    """Monta o SELECT que verifica se um código já possui imagem no banco."""
+    tabela_imagens = validar_identificador_sql(TABELA_IMAGENS, "TABELA_IMAGENS")
+    coluna_codigo_imagem = validar_identificador_sql(COLUNA_CODIGO_IMAGEM, "COLUNA_CODIGO_IMAGEM")
+
+    return f"""
+        SELECT 1
+          FROM {tabela_imagens}
+         WHERE {coluna_codigo_imagem} = :codigo
+    """
+
+
 def erro_chave_duplicada(erro: Exception) -> bool:
     """Identifica erro de PK/unique para contar como imagem já existente."""
     primeiro_arg = erro.args[0] if getattr(erro, "args", None) else None
@@ -337,6 +371,182 @@ def preparar_codigo_banco(codigo: str) -> int:
     return int(codigo_limpo)
 
 
+def executar_insert_imagem(cursor, codigo: int, caminho_img: Path, sql: Optional[str] = None) -> None:
+    """Executa o INSERT de uma única imagem usando o cursor já aberto."""
+    if not caminho_img.exists():
+        raise FileNotFoundError(f"arquivo local não encontrado: {caminho_img}")
+
+    sql = sql or montar_sql_insert_imagem()
+    imagem_bytes = caminho_img.read_bytes()
+    nome_arquivo = caminho_img.name[:50]
+
+    cursor.execute(
+        sql,
+        {
+            "codigo": codigo,
+            "imagem": imagem_bytes,
+            "nome_arquivo": nome_arquivo,
+            "usuario": USUARIO_ALTERACAO_IMAGEM[:50],
+            "flag_automatico": FLAG_EVTCOM_AUTOMATICO,
+        },
+    )
+
+
+def persistir_imagens_banco(imagens_prontas: dict[int, Path]) -> list[ResultadoPersistenciaImagem]:
+    """
+    Persiste imagens selecionadas no banco e retorna o resultado individual.
+    O retorno só acontece depois do commit, para permitir remoção local segura.
+    """
+    if not imagens_prontas:
+        log.info("Nenhuma imagem selecionada para salvar no banco.")
+        return []
+
+    sql = montar_sql_insert_imagem()
+    resultados: list[ResultadoPersistenciaImagem] = []
+    houve_insert = False
+
+    log.info(f"Persistindo {len(imagens_prontas)} imagem(ns) selecionada(s) em {TABELA_IMAGENS}.")
+
+    try:
+        conexao = conectar_banco()
+    except Exception as e:
+        log.warning(f"Erro ao conectar ao banco para salvar imagens: {e}", exc_info=True)
+        raise
+
+    try:
+        cursor = conexao.cursor()
+        try:
+            configurar_bind_blob(cursor)
+
+            for codigo, caminho_img in imagens_prontas.items():
+                try:
+                    log.info(f"Salvando imagem selecionada: {caminho_img.name} (PROCODBASE={codigo})")
+                    executar_insert_imagem(cursor, codigo, caminho_img, sql=sql)
+                    resultados.append(
+                        ResultadoPersistenciaImagem(
+                            codigo=codigo,
+                            caminho=caminho_img,
+                            inserida=True,
+                        )
+                    )
+                    houve_insert = True
+                    log.info(f"OK - Imagem preparada para commit: {caminho_img.name} (PROCODBASE={codigo})")
+                except Exception as e:
+                    if erro_chave_duplicada(e):
+                        resultados.append(
+                            ResultadoPersistenciaImagem(
+                                codigo=codigo,
+                                caminho=caminho_img,
+                                ja_existia=True,
+                            )
+                        )
+                        log.info(
+                            f"Imagem já estava persistida no banco: "
+                            f"{caminho_img.name} (PROCODBASE={codigo})"
+                        )
+                        continue
+
+                    resultados.append(
+                        ResultadoPersistenciaImagem(
+                            codigo=codigo,
+                            caminho=caminho_img,
+                            erro=str(e),
+                        )
+                    )
+                    log.warning(
+                        f"Falha ao salvar imagem selecionada '{caminho_img.name}' "
+                        f"(PROCODBASE={codigo}): {e}",
+                        exc_info=True,
+                    )
+
+            if houve_insert:
+                conexao.commit()
+                log.info("OK - Commit das imagens selecionadas concluído.")
+            else:
+                log.info("Nenhum novo registro foi inserido; commit não necessário.")
+        finally:
+            cursor.close()
+    except Exception as e:
+        log.warning(f"Erro geral ao persistir imagens selecionadas: {e}", exc_info=True)
+        conexao.rollback()
+        raise
+    finally:
+        conexao.close()
+        log.info("Conexão de persistência manual de imagens fechada.")
+
+    return resultados
+
+
+def imagem_existe_banco(codigo: str | int, conexao=None) -> bool:
+    """Verifica se o código informado já possui imagem persistida no banco."""
+    codigo_banco = preparar_codigo_banco(str(codigo))
+    sql = montar_sql_verificar_imagem()
+    conexao_local = conexao is None
+
+    if conexao_local:
+        conexao = conectar_banco()
+
+    try:
+        cursor = conexao.cursor()
+        try:
+            cursor.execute(sql, {"codigo": codigo_banco})
+            return cursor.fetchone() is not None
+        finally:
+            cursor.close()
+    finally:
+        if conexao_local:
+            conexao.close()
+
+
+def listar_codigos_imagens_existentes(codigos: Iterable[str | int]) -> set[int]:
+    """
+    Retorna os códigos que já possuem imagem no banco.
+    Usa uma única conexão e consultas simples para manter compatibilidade
+    com os provedores já suportados pelo projeto.
+    """
+    codigos_validos = []
+
+    for codigo in codigos:
+        try:
+            codigo_banco = preparar_codigo_banco(str(codigo))
+        except ValueError as e:
+            log.warning(f"{e}. Código ignorado na verificação de pendências.")
+            continue
+
+        if codigo_banco not in codigos_validos:
+            codigos_validos.append(codigo_banco)
+
+    if not codigos_validos:
+        return set()
+
+    existentes = set()
+    log.info(f"Verificando {len(codigos_validos)} código(s) de imagem já existente(s) no banco.")
+
+    try:
+        conexao = conectar_banco()
+    except Exception as e:
+        log.warning(f"Erro ao conectar ao banco para verificar imagens existentes: {e}", exc_info=True)
+        raise
+
+    try:
+        for codigo in codigos_validos:
+            try:
+                if imagem_existe_banco(codigo, conexao=conexao):
+                    existentes.add(codigo)
+            except Exception as e:
+                log.warning(
+                    f"Erro ao verificar imagem existente no banco "
+                    f"(PROCODBASE={codigo}): {e}",
+                    exc_info=True,
+                )
+                raise
+    finally:
+        conexao.close()
+        log.info("Conexão de verificação de imagens fechada.")
+
+    return existentes
+
+
 def registrar_imagem_pronta(
     imagens_prontas: dict[int, Path],
     codigo: str,
@@ -363,75 +573,8 @@ def inserir_imagens_banco(imagens_prontas: dict[int, Path]) -> tuple[int, int, i
     Insere no banco as imagens geradas/localizadas.
     Retorna (inseridas, ja_existiam_no_banco, falhas).
     """
-    if not imagens_prontas:
-        log.info("Nenhuma imagem pronta para salvar no banco.")
-        return 0, 0, 0
-
-    sql = montar_sql_insert_imagem()
-    inseridas = 0
-    ja_existiam = 0
-    falhas = 0
-
-    log.info(f"Inserindo {len(imagens_prontas)} imagens na tabela {TABELA_IMAGENS}...")
-
-    try:
-        conexao = conectar_banco()
-    except Exception as e:
-        log.warning(f"Erro ao conectar ao banco para salvar imagens: {e}", exc_info=True)
-        raise
-
-    try:
-        cursor = conexao.cursor()
-        try:
-            configurar_bind_blob(cursor)
-
-            for codigo, caminho_img in imagens_prontas.items():
-                try:
-                    log.info(f"Salvando imagem no banco: {caminho_img.name} (PROCODBASE={codigo})")
-                    imagem_bytes = caminho_img.read_bytes()
-                    nome_arquivo = caminho_img.name[:50]
-
-                    cursor.execute(
-                        sql,
-                        {
-                            "codigo": codigo,
-                            "imagem": imagem_bytes,
-                            "nome_arquivo": nome_arquivo,
-                            "usuario": USUARIO_ALTERACAO_IMAGEM[:50],
-                            "flag_automatico": FLAG_EVTCOM_AUTOMATICO,
-                        },
-                    )
-                    inseridas += 1
-                    log.info(f"OK - Imagem salva no banco: {caminho_img.name} (PROCODBASE={codigo})")
-                except Exception as e:
-                    if erro_chave_duplicada(e):
-                        ja_existiam += 1
-                        log.info(
-                            f"Imagem já existia no banco: "
-                            f"{caminho_img.name} (PROCODBASE={codigo})"
-                        )
-                        continue
-
-                    falhas += 1
-                    log.warning(
-                        f"Não foi possível inserir '{caminho_img.name}' "
-                        f"(PROCODBASE={codigo}) no banco: {e}",
-                        exc_info=True,
-                    )
-
-            conexao.commit()
-            log.info(
-                f"OK - Commit do banco concluído: "
-                f"{inseridas} inserida(s), {ja_existiam} já existente(s), {falhas} falha(s)."
-            )
-        finally:
-            cursor.close()
-    except Exception as e:
-        log.warning(f"Erro geral ao salvar imagens no banco: {e}", exc_info=True)
-        conexao.rollback()
-        raise
-    finally:
-        conexao.close()
-        log.info("Conexão de insert de imagens fechada.")
-
+    resultados = persistir_imagens_banco(imagens_prontas)
+    inseridas = sum(1 for resultado in resultados if resultado.inserida)
+    ja_existiam = sum(1 for resultado in resultados if resultado.ja_existia)
+    falhas = sum(1 for resultado in resultados if not resultado.sucesso)
     return inseridas, ja_existiam, falhas

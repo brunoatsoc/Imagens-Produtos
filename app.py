@@ -2,11 +2,10 @@ import logging
 import random
 import re
 import time
-from pathlib import Path
 
 from tqdm import tqdm
 
-from banco import inserir_imagens_banco, iterar_lotes_produtos_banco, registrar_imagem_pronta
+from banco import iterar_lotes_produtos_banco
 from busca_imagens import (
     baixar_imagem,
     buscar_candidatos_imagens,
@@ -51,13 +50,9 @@ def main():
     ja_existia = 0
     redimensionadas = 0
     total_produtos = 0
-    inseridas_banco = 0
-    ja_existiam_banco = 0
-    falhas_banco = 0
 
     for numero_lote, produtos in enumerate(iterar_lotes_produtos_banco(PRODUTOS_POR_LOTE), start=1):
         total_produtos += len(produtos)
-        imagens_prontas: dict[int, Path] = {}
 
         log.info(f"Lote {numero_lote}: {len(produtos)} ofertas ativas sem imagem encontradas no banco.")
 
@@ -81,7 +76,6 @@ def main():
                     log.info(f"Imagem ajustada para {tamanho_final}: {nome_final}")
 
                 ja_existia += 1
-                registrar_imagem_pronta(imagens_prontas, nome_arquivo, caminho_img)
                 continue
 
             candidatos = buscar_candidatos_imagens(nome_busca)
@@ -115,7 +109,6 @@ def main():
                     log.info(f"'{nome_busca}' → {nome_final}")
                     sucesso += 1
                     baixou = True
-                    registrar_imagem_pronta(imagens_prontas, nome_arquivo, caminho_img)
                     break
                 except Exception as e:
                     log.warning(
@@ -132,19 +125,6 @@ def main():
 
             time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
 
-        log.info(
-            f"Salvando no banco as imagens prontas do lote {numero_lote}: "
-            f"{len(imagens_prontas)} imagem(ns)."
-        )
-        inseridas_lote, ja_existiam_lote, falhas_lote = inserir_imagens_banco(imagens_prontas)
-        inseridas_banco += inseridas_lote
-        ja_existiam_banco += ja_existiam_lote
-        falhas_banco += falhas_lote
-        log.info(
-            f"Resultado do banco no lote {numero_lote}: "
-            f"{inseridas_lote} salva(s), {ja_existiam_lote} já existente(s), {falhas_lote} falha(s)."
-        )
-
     log.info("=" * 50)
     log.info(f" CONCLUÍDO!")
     log.info(f"    Produtos processados: {total_produtos}")
@@ -152,8 +132,9 @@ def main():
     log.info(f"    Já existiam         : {ja_existia}")
     log.info(f"    Ajustadas {tamanho_final}   : {redimensionadas}")
     log.info(f"    Falhas               : {falha}")
-    log.info(f"    Inseridas no banco : {inseridas_banco}")
-    log.info(f"    Já estavam no banco: {ja_existiam_banco}")
-    log.info(f"    Falhas no banco    : {falhas_banco}")
-    log.info(f"    Imagens salvas em   : {pasta.resolve()}")
+    log.info(f"    Pendentes locais     : {sucesso + ja_existia}")
+    log.info(f"    Imagens locais em    : {pasta.resolve()}")
+    log.info("    Nenhuma imagem foi salva automaticamente no banco.")
+    log.info("    Use a tela de gerenciamento para selecionar e persistir as imagens desejadas.")
+    log.info("    Para abrir a tela: python teste.py gerenciar")
     log.info("=" * 50)
