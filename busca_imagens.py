@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from PIL import Image
 from ddgs import DDGS
+from ddgs.exceptions import TimeoutException
 
 from config import (
     ALTURA_MIN_PX,
@@ -432,13 +433,20 @@ def buscar_candidatos_imagens(produto: str, max_resultados: int = MAX_RESULTADOS
                 descartes_por_motivo = {}
 
                 for consulta in consultas:
-                    resultados = ddgs.images(
-                        consulta,
-                        region="br-pt",
-                        safesearch="moderate",
-                        type_image="photo",
-                        max_results=max_resultados,
-                    )
+                    try:
+                        resultados = ddgs.images(
+                            consulta,
+                            region="br-pt",
+                            safesearch="moderate",
+                            type_image="photo",
+                            max_results=max_resultados,
+                        )
+                    except TimeoutException as e:
+                        log.warning(
+                            f"Timeout na consulta '{consulta}' para '{produto}': {e}. "
+                            "Continuando com os candidatos já obtidos."
+                        )
+                        continue
 
                     resultados_consulta = 0
                     candidatos_consulta = 0
