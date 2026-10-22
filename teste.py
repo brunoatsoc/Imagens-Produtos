@@ -12,7 +12,6 @@
        DB_PASSWORD=senha
        DB_DSN=host:porta/servico
        TABELA_OFERTAS=CLIENTE.WSOFERTASATIVAS
-       TABELA_IMAGENS=CLIENTE.PRODUTOSIMAGENS
        LARGURA_FINAL_PX=406
        ALTURA_FINAL_PX=406
 
@@ -43,18 +42,18 @@ import argparse
 
 def criar_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Busca imagens de produtos e gerencia a persistência manual no banco.",
+        description="Busca imagens de produtos e gerencia arquivos locais.",
     )
     subparsers = parser.add_subparsers(dest="comando")
 
     subparsers.add_parser(
         "baixar",
-        help="Busca e baixa imagens localmente, sem salvar automaticamente no banco.",
+        help="Busca e baixa imagens na pasta local configurada.",
     )
 
     parser_gerenciar = subparsers.add_parser(
         "gerenciar",
-        help="Abre a tela local para selecionar, salvar ou excluir imagens baixadas.",
+        help="Abre a tela local para visualizar, selecionar ou excluir imagens baixadas.",
     )
     parser_gerenciar.add_argument("--host", default="127.0.0.1", help="Host da tela local.")
     parser_gerenciar.add_argument(

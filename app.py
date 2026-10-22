@@ -54,7 +54,7 @@ def main():
     for numero_lote, produtos in enumerate(iterar_lotes_produtos_banco(PRODUTOS_POR_LOTE), start=1):
         total_produtos += len(produtos)
 
-        log.info(f"Lote {numero_lote}: {len(produtos)} ofertas ativas sem imagem encontradas no banco.")
+        log.info(f"Lote {numero_lote}: {len(produtos)} ofertas ativas encontradas no banco.")
 
         for nome_busca, nome_arquivo in tqdm(produtos, desc=f"Baixando lote {numero_lote}", unit="produto"):
             # Salva sempre como .png para manter o formato esperado pelo fluxo atual.
@@ -134,7 +134,7 @@ def main():
     log.info(f"    Falhas               : {falha}")
     log.info(f"    Pendentes locais     : {sucesso + ja_existia}")
     log.info(f"    Imagens locais em    : {pasta.resolve()}")
-    log.info("    Nenhuma imagem foi salva automaticamente no banco.")
-    log.info("    Use a tela de gerenciamento para selecionar e persistir as imagens desejadas.")
+    log.info("    As imagens são armazenadas somente na pasta local configurada.")
+    log.info("    Use a tela de gerenciamento para visualizar e excluir imagens locais.")
     log.info("    Para abrir a tela: python teste.py gerenciar")
     log.info("=" * 50)

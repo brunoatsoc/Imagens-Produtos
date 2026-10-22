@@ -10,8 +10,7 @@ from urllib.parse import quote, unquote, urlparse
 from gerenciador_imagens import (
     arquivo_local_por_nome,
     excluir_imagens_locais,
-    listar_imagens_pendentes,
-    salvar_imagens_selecionadas,
+    listar_arquivos_locais,
 )
 
 
@@ -123,17 +122,6 @@ HTML_GERENCIAMENTO = r"""<!doctype html>
     button:disabled {
       cursor: not-allowed;
       opacity: 0.5;
-    }
-
-    .primary {
-      border-color: var(--primary);
-      background: var(--primary);
-      color: #ffffff;
-    }
-
-    .primary:hover:not(:disabled) {
-      border-color: var(--primary-strong);
-      background: var(--primary-strong);
     }
 
     .danger {
@@ -311,7 +299,7 @@ HTML_GERENCIAMENTO = r"""<!doctype html>
     <div class="topbar">
       <h1>Imagens locais</h1>
       <div class="meta">
-        <span id="total">0 pendentes</span>
+        <span id="total">0 imagens</span>
         <span id="selected">0 selecionadas</span>
       </div>
     </div>
@@ -319,7 +307,6 @@ HTML_GERENCIAMENTO = r"""<!doctype html>
       <button id="reload" type="button">Atualizar</button>
       <button id="selectAll" type="button">Selecionar todas</button>
       <button id="clearAll" type="button">Desmarcar todas</button>
-      <button id="save" type="button" class="primary">Salvar selecionadas</button>
       <button id="delete" type="button" class="danger">Excluir selecionadas</button>
     </div>
   </header>
@@ -340,7 +327,6 @@ HTML_GERENCIAMENTO = r"""<!doctype html>
     const statusEl = document.getElementById("status");
     const totalEl = document.getElementById("total");
     const selectedEl = document.getElementById("selected");
-    const saveBtn = document.getElementById("save");
     const deleteBtn = document.getElementById("delete");
     const BASE_PATH = "/intellisys-images";
 
@@ -363,9 +349,8 @@ HTML_GERENCIAMENTO = r"""<!doctype html>
     }
 
     function updateCounters() {
-      totalEl.textContent = plural(state.imagens.length, "pendente", "pendentes");
+      totalEl.textContent = plural(state.imagens.length, "imagem", "imagens");
       selectedEl.textContent = plural(state.selecionadas.size, "selecionada", "selecionadas");
-      saveBtn.disabled = state.selecionadas.size === 0 || state.carregando;
       deleteBtn.disabled = state.selecionadas.size === 0 || state.carregando;
     }
 
@@ -374,7 +359,7 @@ HTML_GERENCIAMENTO = r"""<!doctype html>
 
       if (!state.imagens.length) {
         grid.className = "empty";
-        grid.innerHTML = "Nenhuma imagem pendente.";
+        grid.innerHTML = "Nenhuma imagem na pasta de saída.";
         return;
       }
 
@@ -449,40 +434,6 @@ HTML_GERENCIAMENTO = r"""<!doctype html>
       return payload;
     }
 
-    async function salvarSelecionadas() {
-      const arquivos = [...state.selecionadas];
-      if (!arquivos.length) return;
-
-      state.carregando = true;
-      updateCounters();
-      setStatus("Salvando imagens selecionadas...");
-
-      try {
-        const payload = await enviarAcao(`${BASE_PATH}/api/salvar`, arquivos);
-        const resumo = payload.resumo || {};
-        const partes = [
-          plural(resumo.inseridas || 0, "inserida", "inseridas"),
-          plural(resumo.ja_existiam || 0, "já existente", "já existentes"),
-          plural(resumo.removidas || 0, "arquivo removido", "arquivos removidos")
-        ];
-
-        if (resumo.falhas_persistencia || resumo.falhas_remocao || (payload.erros || []).length) {
-          partes.push(plural((resumo.falhas_persistencia || 0) + (resumo.falhas_remocao || 0) + (payload.erros || []).length, "falha", "falhas"));
-        }
-
-        const falhou = resumo.falhas_persistencia || resumo.falhas_remocao || (payload.erros || []).length;
-        const mensagem = partes.join(", ") + ".";
-        state.selecionadas.clear();
-        await carregar();
-        setStatus(mensagem, falhou ? "error" : "ok");
-      } catch (error) {
-        setStatus(error.message, "error");
-      } finally {
-        state.carregando = false;
-        updateCounters();
-      }
-    }
-
     async function excluirSelecionadas() {
       const arquivos = [...state.selecionadas];
       if (!arquivos.length) return;
@@ -551,7 +502,6 @@ HTML_GERENCIAMENTO = r"""<!doctype html>
       state.selecionadas.clear();
       render();
     });
-    saveBtn.addEventListener("click", salvarSelecionadas);
     deleteBtn.addEventListener("click", excluirSelecionadas);
 
     carregar();
@@ -623,36 +573,6 @@ def arquivos_da_requisicao(handler: BaseHTTPRequestHandler) -> list[str]:
     return [str(arquivo) for arquivo in arquivos]
 
 
-def json_resultado_gerenciamento(resultado) -> dict:
-    return {
-        "resumo": {
-            "inseridas": resultado.inseridas,
-            "ja_existiam": resultado.ja_existiam,
-            "falhas_persistencia": resultado.falhas_persistencia,
-            "removidas": resultado.removidas,
-            "falhas_remocao": resultado.falhas_remocao,
-        },
-        "persistencias": [
-            {
-                "codigo": item.codigo,
-                "nome_arquivo": item.caminho.name,
-                "status": item.status,
-                "erro": item.erro,
-            }
-            for item in resultado.persistencias
-        ],
-        "remocoes": [
-            {
-                "nome_arquivo": item.nome_arquivo,
-                "removida": item.removida,
-                "erro": item.erro,
-            }
-            for item in resultado.remocoes
-        ],
-        "erros": resultado.erros,
-    }
-
-
 class GerenciamentoImagensHandler(BaseHTTPRequestHandler):
     server_version = "GerenciadorImagens/1.0"
 
@@ -686,12 +606,6 @@ class GerenciamentoImagensHandler(BaseHTTPRequestHandler):
         rota = urlparse(self.path)
 
         try:
-            if rota.path == f"{CAMINHO_BASE}/api/salvar":
-                arquivos = arquivos_da_requisicao(self)
-                resultado = salvar_imagens_selecionadas(arquivos)
-                resposta_json(self, json_resultado_gerenciamento(resultado))
-                return
-
             if rota.path == f"{CAMINHO_BASE}/api/excluir":
                 arquivos = arquivos_da_requisicao(self)
                 resultados = excluir_imagens_locais(arquivos)
@@ -721,10 +635,10 @@ class GerenciamentoImagensHandler(BaseHTTPRequestHandler):
 
     def enviar_lista_imagens(self) -> None:
         try:
-            imagens = [imagem_para_json(imagem) for imagem in listar_imagens_pendentes()]
+            imagens = [imagem_para_json(imagem) for imagem in listar_arquivos_locais()]
             resposta_json(self, {"imagens": imagens, "total": len(imagens)})
         except Exception as e:
-            log.warning(f"Erro ao listar imagens pendentes: {e}", exc_info=True)
+            log.warning(f"Erro ao listar imagens locais: {e}", exc_info=True)
             resposta_json(self, {"erro": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def enviar_imagem(self, nome_url: str) -> None:
